@@ -1,0 +1,623 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Claude Gateway Admin</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  /* Tokens from DESIGN.md (Geist): one ink tone on a near-white canvas, 1px hairlines, color only for state. */
+  :root {
+    --canvas: #fafafa; --elevated: #ffffff; --soft: #f2f2f2;
+    --ink: #171717; --body: #4d4d4d; --mute: #737373; --faint: #a1a1a1;
+    --hairline: #ebebeb; --hairline-strong: #d4d4d4;
+    --link: #0070f3; --link-soft: #d3e5ff; --link-ink: #0761d1;
+    --error: #ee0000; --error-soft: #ffe5e5; --error-ink: #c50000;
+    --warning: #f5a623; --warning-soft: #ffefcf; --warning-ink: #ab570a;
+    --on-ink: #ffffff;
+    --shadow-float: 0 2px 2px rgba(0,0,0,.04), 0 8px 16px -4px rgba(0,0,0,.08), 0 0 0 1px var(--hairline);
+    --sans: "Geist", Arial, sans-serif;
+    --mono: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --canvas: #0a0a0a; --elevated: #111111; --soft: #1a1a1a;
+      --ink: #ededed; --body: #a1a1a1; --mute: #8f8f8f; --faint: #6b6b6b;
+      --hairline: #262626; --hairline-strong: #3a3a3a;
+      --link: #3291ff; --link-soft: #0a2547; --link-ink: #7ab8ff;
+      --error: #ff4d4d; --error-soft: #3b0a0a; --error-ink: #ff8080;
+      --warning: #f5a623; --warning-soft: #3a2606; --warning-ink: #ffc561;
+      --on-ink: #0a0a0a;
+      --shadow-float: 0 2px 2px rgba(0,0,0,.4), 0 8px 16px -4px rgba(0,0,0,.6), 0 0 0 1px var(--hairline);
+      color-scheme: dark;
+    }
+  }
+
+  * { box-sizing: border-box; }
+  html { -webkit-font-smoothing: antialiased; }
+  body { margin: 0; background: var(--canvas); color: var(--ink); font: 400 14px/20px var(--sans); }
+  ::selection { background: var(--link-soft); color: var(--ink); }
+  * { scrollbar-width: thin; scrollbar-color: var(--hairline-strong) transparent; }
+  :focus-visible { outline: 2px solid var(--link); outline-offset: 2px; border-radius: 6px; }
+  code, .mono { font-family: var(--mono); font-size: 13px; }
+  .num { text-align: right; font-variant-numeric: tabular-nums; }
+  [hidden] { display: none !important; }
+  .visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+
+  /* ---- top bar ---- */
+  .topbar { position: sticky; top: 0; z-index: 5; background: color-mix(in srgb, var(--canvas) 88%, transparent);
+    backdrop-filter: saturate(1.4) blur(8px); border-bottom: 1px solid var(--hairline); }
+  .topbar-inner { max-width: 1200px; margin: 0 auto; padding: 12px 24px; display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
+  .brand { display: flex; align-items: center; gap: 10px; font-weight: 600; letter-spacing: -0.28px; margin-right: auto; }
+  .brand-mark { width: 22px; height: 22px; border-radius: 6px; background: var(--ink); display: grid; place-items: center; }
+  .brand-mark svg { width: 12px; height: 12px; }
+  .brand-sep { color: var(--hairline-strong); font-weight: 400; }
+  .brand-sub { color: var(--body); font-weight: 500; }
+
+  /* ---- layout ---- */
+  main { max-width: 1200px; margin: 0 auto; padding: 32px 24px 96px; }
+  .page-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; flex-wrap: wrap; margin-bottom: 24px; }
+  h1 { font-size: 32px; line-height: 40px; font-weight: 600; letter-spacing: -1.28px; margin: 0; }
+  .lede { color: var(--body); margin: 4px 0 0; }
+  h2 { font-size: 16px; line-height: 24px; font-weight: 600; letter-spacing: -0.32px; margin: 0; }
+  .section { margin-top: 40px; }
+  .section-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
+  .section-head p { margin: 0; color: var(--mute); font-size: 13px; }
+
+  .panel { background: var(--elevated); border: 1px solid var(--hairline); border-radius: 12px; }
+  .panel-pad { padding: 24px; }
+  .scroll-x { overflow-x: auto; }
+
+  /* ---- controls (shadcn-style, Geist sizing) ---- */
+  .btn { display: inline-flex; align-items: center; justify-content: center; gap: 6px; height: 32px; padding: 0 12px;
+    font: 500 14px/20px var(--sans); border-radius: 6px; border: 1px solid var(--hairline); background: var(--elevated);
+    color: var(--ink); cursor: pointer; white-space: nowrap; transition: background .15s, border-color .15s, opacity .15s; }
+  .btn:hover { background: var(--soft); border-color: var(--hairline-strong); }
+  .btn:disabled { opacity: .5; cursor: not-allowed; }
+  .btn-primary { background: var(--ink); border-color: var(--ink); color: var(--on-ink); }
+  .btn-primary:hover { background: color-mix(in srgb, var(--ink) 86%, var(--canvas)); border-color: transparent; }
+  .btn-danger { color: var(--error-ink); }
+  .btn-danger:hover { background: var(--error-soft); border-color: color-mix(in srgb, var(--error) 35%, var(--hairline)); }
+  .btn-sm { height: 28px; padding: 0 10px; font-size: 13px; }
+  .btn-ghost { border-color: transparent; background: transparent; color: var(--body); }
+  .btn-ghost:hover { background: var(--soft); color: var(--ink); border-color: transparent; }
+
+  .input { height: 32px; padding: 0 10px; font: 400 14px/20px var(--sans); color: var(--ink); background: var(--elevated);
+    border: 1px solid var(--hairline); border-radius: 6px; transition: border-color .15s, box-shadow .15s; min-width: 0; }
+  .input::placeholder { color: var(--faint); }
+  .input:hover { border-color: var(--hairline-strong); }
+  .input:focus { outline: none; border-color: var(--ink); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ink) 10%, transparent); }
+  input[type="date"].input { font-family: var(--sans); }
+  label.field { display: grid; gap: 6px; font-size: 13px; font-weight: 500; color: var(--body); }
+  .hint { font-weight: 400; color: var(--mute); font-size: 12px; }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .controls { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .range { display: flex; align-items: center; gap: 6px; color: var(--mute); font-size: 13px; }
+  .range .input { width: 148px; }
+
+  .badge { display: inline-flex; align-items: center; gap: 6px; height: 22px; padding: 0 8px; border-radius: 999px;
+    font-size: 12px; font-weight: 500; }
+  .badge::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+  .badge.active, .badge.ready { background: var(--link-soft); color: var(--link-ink); }
+  .badge.disabled { background: var(--error-soft); color: var(--error-ink); }
+  .badge.resting { background: var(--warning-soft); color: var(--warning-ink); }
+
+  /* ---- stats strip: one panel split by hairlines ---- */
+  .stats { display: grid; grid-template-columns: repeat(5, 1fr); }
+  .stat { padding: 20px 24px; border-left: 1px solid var(--hairline); min-width: 0; }
+  .stat:first-child { border-left: 0; }
+  .stat span { display: block; color: var(--mute); font-size: 13px; margin-bottom: 6px; }
+  .stat b { display: block; font-size: 24px; line-height: 32px; font-weight: 600; letter-spacing: -0.72px; font-variant-numeric: tabular-nums;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  @media (max-width: 900px) {
+    .stats { grid-template-columns: repeat(2, 1fr); }
+    .stat { border-left: 0; border-top: 1px solid var(--hairline); }
+    .stat:nth-child(-n+2) { border-top: 0; }
+    .stat:nth-child(even) { border-left: 1px solid var(--hairline); }
+  }
+
+  /* ---- chart ---- */
+  .chart { display: grid; grid-template-columns: auto 1fr; gap: 0 12px; }
+  .chart-y { display: flex; flex-direction: column; justify-content: space-between; height: 160px; color: var(--mute);
+    font: 400 11px/1 var(--mono); text-align: right; padding: 0 0 0 0; }
+  .bars { position: relative; display: flex; align-items: flex-end; gap: 6px; height: 160px; border-bottom: 1px solid var(--hairline);
+    background: linear-gradient(var(--hairline-soft, var(--soft)) 1px, transparent 1px) 0 0 / 100% 50%; }
+  .bar { flex: 1; min-width: 4px; background: var(--ink); border-radius: 4px 4px 0 0; position: relative; cursor: default;
+    transition: opacity .15s; }
+  .bars:hover .bar { opacity: .35; }
+  .bars .bar:hover { opacity: 1; }
+  .bar .tip { position: absolute; bottom: calc(100% + 8px); left: 50%; transform: translateX(-50%); background: var(--elevated);
+    color: var(--ink); box-shadow: var(--shadow-float); border-radius: 8px; padding: 8px 10px; font-size: 12px; line-height: 16px;
+    white-space: nowrap; pointer-events: none; opacity: 0; transition: opacity .12s; z-index: 2; }
+  .bar .tip b { display: block; font-weight: 600; }
+  .bar:hover .tip { opacity: 1; }
+  .chart-x { grid-column: 2; display: flex; gap: 6px; color: var(--mute); font: 400 11px/1 var(--mono); padding-top: 8px; }
+  .chart-x span { flex: 1; min-width: 4px; text-align: center; white-space: nowrap; overflow: visible; }
+  .empty { color: var(--mute); padding: 32px 0; text-align: center; }
+
+  /* ---- tables ---- */
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 0 16px; height: 48px; border-bottom: 1px solid var(--hairline); white-space: nowrap; }
+  thead th { height: 40px; color: var(--mute); font-size: 12px; font-weight: 500; background: var(--canvas); }
+  thead th:first-child { border-top-left-radius: 12px; } thead th:last-child { border-top-right-radius: 12px; }
+  tbody tr:last-child td { border-bottom: 0; }
+  tbody tr { transition: background .12s; }
+  tbody tr:hover { background: color-mix(in srgb, var(--soft) 60%, transparent); }
+  td.name, .who .name { font-weight: 500; }
+  .who { display: grid; gap: 2px; padding: 8px 0; }
+  .who .id { color: var(--mute); font-size: 12px; }
+  .link { all: unset; cursor: pointer; text-align: left; text-decoration: underline; text-decoration-color: var(--hairline-strong);
+    text-underline-offset: 3px; transition: text-decoration-color .15s; }
+  .link:hover { text-decoration-color: var(--ink); }
+  .link:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; border-radius: 4px; }
+  td.dim { color: var(--mute); }
+  td .row { flex-wrap: nowrap; gap: 4px; }
+  .meter { display: inline-flex; align-items: center; gap: 10px; }
+  .meter-track { width: 96px; height: 6px; border-radius: 999px; background: var(--soft); overflow: hidden; }
+  .meter-fill { height: 100%; border-radius: 999px; background: var(--ink); }
+  .meter-fill.warn { background: var(--warning); } .meter-fill.over { background: var(--error); }
+  .meter-text { font-variant-numeric: tabular-nums; color: var(--body); }
+
+  /* ---- create form + secret reveal ---- */
+  .create { display: grid; grid-template-columns: 2fr 1fr 1fr auto; gap: 12px; align-items: end; }
+  @media (max-width: 720px) { .create { grid-template-columns: 1fr; } }
+  .secret { margin-top: 20px; border: 1px solid color-mix(in srgb, var(--warning) 45%, var(--hairline)); background: var(--warning-soft);
+    border-radius: 12px; padding: 16px; display: grid; gap: 12px; }
+  .secret-title { font-weight: 600; color: var(--ink); }
+  .secret-note { color: var(--warning-ink); font-size: 13px; }
+  .kv { display: grid; grid-template-columns: 110px 1fr auto; gap: 8px; align-items: center; }
+  .kv code { background: var(--elevated); border: 1px solid var(--hairline); border-radius: 6px; padding: 6px 10px; overflow-wrap: anywhere; }
+  .kv span { color: var(--body); font-size: 13px; }
+
+  /* ---- login ---- */
+  .login-wrap { min-height: 100vh; display: grid; place-items: center; padding: 24px; }
+  .login { width: 100%; max-width: 380px; padding: 32px; display: grid; gap: 16px; }
+  .login .brand { margin: 0 0 8px; }
+  .login h1 { font-size: 24px; line-height: 32px; letter-spacing: -0.72px; }
+  .login .input { height: 40px; }
+  .login .btn { height: 40px; width: 100%; }
+  .error-text { color: var(--error-ink); font-size: 13px; min-height: 20px; margin: 0; }
+
+  /* ---- dialog + toast ---- */
+  dialog { border: 0; padding: 0; border-radius: 12px; background: var(--elevated); color: var(--ink); box-shadow: var(--shadow-float);
+    width: min(420px, calc(100vw - 32px)); }
+  dialog::backdrop { background: rgba(0,0,0,.35); backdrop-filter: blur(2px); }
+  dialog[open] { animation: pop .18s cubic-bezier(.16,1,.3,1); }
+  @keyframes pop { from { opacity: 0; transform: translateY(6px) scale(.98); } }
+  .dialog-body { padding: 24px; display: grid; gap: 16px; }
+  .dialog-body p { margin: 0; color: var(--body); }
+  .dialog-foot { display: flex; justify-content: flex-end; gap: 8px; padding: 16px 24px; border-top: 1px solid var(--hairline);
+    background: var(--canvas); border-radius: 0 0 12px 12px; }
+  .toast { position: fixed; right: 24px; bottom: 24px; z-index: 20; max-width: 360px; background: var(--elevated); color: var(--ink);
+    box-shadow: var(--shadow-float); border-radius: 10px; padding: 12px 16px; font-size: 13px; display: flex; gap: 10px; align-items: flex-start;
+    transform: translateY(12px); opacity: 0; transition: opacity .2s, transform .25s cubic-bezier(.16,1,.3,1); pointer-events: none; }
+  .toast.show { transform: none; opacity: 1; }
+  .toast::before { content: ""; flex: none; width: 8px; height: 8px; border-radius: 50%; margin-top: 6px; background: var(--link); }
+  .toast.error::before { background: var(--error); }
+
+  @media (max-width: 640px) {
+    main { padding: 24px 16px 64px; } .topbar-inner { padding: 12px 16px; }
+    h1 { font-size: 24px; line-height: 32px; letter-spacing: -0.72px; }
+    .brand { width: 100%; }
+    .controls { width: 100%; }
+    .range { width: 100%; }
+    .range .input { flex: 1; width: auto; }
+    .controls .btn { flex: 1; }
+  }
+  @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }
+</style>
+</head>
+<body>
+
+<div id="login" class="login-wrap" hidden>
+  <form id="loginForm" class="panel login" novalidate>
+    <div class="brand"><span class="brand-mark"><svg viewBox="0 0 12 12" aria-hidden="true"><path d="M2 6h8M6 2v8" stroke="var(--on-ink)" stroke-width="1.6" stroke-linecap="round"/></svg></span>Claude Gateway</div>
+    <div>
+      <h1>Admin sign in</h1>
+      <p class="lede">Use the <code>ADMIN_ID</code> and <code>ADMIN_SECRET</code> from the server's .env.</p>
+    </div>
+    <label class="field">Admin ID<input id="adminId" class="input" autocomplete="username" required></label>
+    <label class="field">Admin secret<input id="adminSecret" class="input" type="password" autocomplete="current-password" required></label>
+    <label class="field">Authenticator code <span class="hint">6 digits, if 2FA is turned on</span>
+      <input id="adminOtp" class="input" inputmode="numeric" autocomplete="one-time-code" pattern="\d{6}" maxlength="6" placeholder="123456"></label>
+    <button class="btn btn-primary" type="submit">Sign in</button>
+    <p id="loginError" class="error-text" role="alert"></p>
+  </form>
+</div>
+
+<div id="app" hidden>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <div class="brand"><span class="brand-mark"><svg viewBox="0 0 12 12" aria-hidden="true"><path d="M2 6h8M6 2v8" stroke="var(--on-ink)" stroke-width="1.6" stroke-linecap="round"/></svg></span>Claude Gateway<span class="brand-sep">/</span><span class="brand-sub">Admin</span></div>
+      <div class="controls">
+        <div class="range">
+          <input type="date" id="from" class="input" aria-label="From date">
+          <span>to</span>
+          <input type="date" id="to" class="input" aria-label="To date">
+        </div>
+        <button id="refresh" class="btn">Refresh</button>
+        <button id="logout" class="btn btn-ghost">Sign out</button>
+      </div>
+    </div>
+  </header>
+
+  <main>
+    <div class="page-head">
+      <div>
+        <h1>Usage</h1>
+        <p class="lede" id="rangeLabel">Spend and requests across all clients.</p>
+      </div>
+    </div>
+
+    <div class="panel stats" id="stats"></div>
+
+    <section class="section">
+      <div class="section-head"><h2>Daily spend</h2><p>Hover a bar for the day's totals</p></div>
+      <div class="panel panel-pad">
+        <div class="chart">
+          <div class="chart-y" id="chartY"></div>
+          <div class="bars" id="daily"></div>
+          <div class="chart-x" id="chartX"></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="section-head"><h2>Clients</h2><p>Click a name for recent requests. Budget bar is this calendar month (UTC)</p></div>
+      <div class="panel scroll-x">
+        <table>
+          <thead><tr><th>Client</th><th>Status</th><th class="num">Spend</th><th>Monthly budget</th>
+            <th class="num">Req / min</th><th class="num">Requests</th><th>Last used</th><th><span class="visually-hidden">Actions</span></th></tr></thead>
+          <tbody id="clients"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="section-head"><h2>New client</h2><p>The secret is shown once</p></div>
+      <div class="panel panel-pad">
+        <form id="createForm" class="create">
+          <label class="field">Name<input id="newName" class="input" placeholder="Priya, data team" required maxlength="100"></label>
+          <label class="field">Budget, USD / month <span class="hint">empty = default</span><input id="newBudget" class="input" type="number" min="0" step="0.01" placeholder="50"></label>
+          <label class="field">Requests / min <span class="hint">empty = default</span><input id="newRpm" class="input" type="number" min="1" step="1" placeholder="20"></label>
+          <button class="btn btn-primary" type="submit">Create client</button>
+        </form>
+        <div id="newSecret"></div>
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="section-head"><h2>Anthropic keys</h2><p>Requests rotate across ready keys; a rate-limited key rests</p></div>
+      <div class="panel scroll-x">
+        <table>
+          <thead><tr><th>Key</th><th>Status</th><th class="num">Requests</th><th class="num">Spend</th><th class="num">Errors</th></tr></thead>
+          <tbody id="keys"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="section" id="detailCard" hidden>
+      <div class="section-head"><h2 id="detailTitle"></h2><button class="btn btn-sm btn-ghost" id="detailClose" type="button">Close</button></div>
+      <div class="panel scroll-x">
+        <table>
+          <thead><tr><th>Time</th><th>Model</th><th>Key</th><th class="num">Input</th><th class="num">Output</th><th class="num">Cost</th><th class="num">Duration</th><th>Status</th></tr></thead>
+          <tbody id="detail"></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+</div>
+
+<dialog id="limitsDialog">
+  <form method="dialog" id="limitsForm">
+    <div class="dialog-body">
+      <div><h2>Edit limits</h2><p id="limitsFor"></p></div>
+      <label class="field">Monthly budget, USD <span class="hint">empty = unlimited</span><input id="limBudget" class="input" type="number" min="0" step="0.01"></label>
+      <label class="field">Requests per minute <span class="hint">empty = unlimited</span><input id="limRpm" class="input" type="number" min="1" step="1"></label>
+    </div>
+    <div class="dialog-foot">
+      <button class="btn" value="cancel" formnovalidate>Cancel</button>
+      <button class="btn btn-primary" value="save">Save limits</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="confirmDialog">
+  <form method="dialog">
+    <div class="dialog-body"><div><h2 id="confirmTitle"></h2></div><p id="confirmText"></p></div>
+    <div class="dialog-foot">
+      <button class="btn" value="cancel">Cancel</button>
+      <button class="btn btn-primary" value="ok" id="confirmOk"></button>
+    </div>
+  </form>
+</dialog>
+
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+
+<script nonce="__CSP_NONCE__">
+const API = location.pathname.replace(/\/admin\/?$/, "");
+const $ = (id) => document.getElementById(id);
+const usd = (n) => "$" + Number(n || 0).toFixed(n && n < 1 ? 4 : 2);
+const int = (n) => Number(n || 0).toLocaleString();
+const when = (iso) => (iso ? new Date(iso).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" }) : "Never");
+const ago = (iso) => {
+  if (!iso) return "Never";
+  const s = (Date.now() - new Date(iso)) / 1000;
+  if (s < 60) return "Just now";
+  if (s < 3600) return Math.floor(s / 60) + " min ago";
+  if (s < 86400) return Math.floor(s / 3600) + " h ago";
+  return when(iso);
+};
+
+// Build DOM with textContent only: client names come from user input.
+function el(tag, props = {}, ...kids) {
+  const e = Object.assign(document.createElement(tag), props);
+  e.append(...kids.filter((k) => k !== null && k !== undefined));
+  return e;
+}
+function row(cells) {
+  return el("tr", {}, ...cells.map((c) => {
+    if (c instanceof Node) return el("td", {}, c);
+    if (c && typeof c === "object") return el("td", { className: c.cls || "" }, c.node ?? String(c.text ?? ""));
+    return el("td", {}, String(c ?? ""));
+  }));
+}
+const badge = (kind, text) => el("span", { className: "badge " + kind, textContent: text });
+
+let toastTimer;
+function toast(msg, isError = false) {
+  const t = $("toast");
+  t.textContent = msg;
+  t.className = "toast show" + (isError ? " error" : "");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => (t.className = "toast" + (isError ? " error" : "")), 3500);
+}
+
+function confirmAction(title, text, okLabel) {
+  $("confirmTitle").textContent = title;
+  $("confirmText").textContent = text;
+  $("confirmOk").textContent = okLabel;
+  const d = $("confirmDialog");
+  d.returnValue = "";
+  d.showModal();
+  return new Promise((resolve) => d.addEventListener("close", () => resolve(d.returnValue === "ok"), { once: true }));
+}
+
+let token = null;
+try { token = sessionStorage.getItem("gwToken"); } catch {}
+
+async function api(path, opts = {}) {
+  const res = await fetch(API + path, {
+    ...opts,
+    headers: { "Content-Type": "application/json", ...(token && { Authorization: "Bearer " + token }) },
+  });
+  if (res.status === 401 && path !== "/token") { logout(); throw new Error("Session expired. Sign in again."); }
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(body.error || body.message || res.statusText);
+  return body;
+}
+
+function show(loggedIn) { $("login").hidden = loggedIn; $("app").hidden = !loggedIn; if (!loggedIn) $("adminId").focus(); }
+function logout() { token = null; try { sessionStorage.removeItem("gwToken"); } catch {} show(false); }
+
+$("loginForm").onsubmit = async (e) => {
+  e.preventDefault();
+  $("loginError").textContent = "";
+  const btn = e.submitter; btn.disabled = true;
+  try {
+    const r = await api("/token", { method: "POST", body: JSON.stringify({ clientId: $("adminId").value, clientSecret: $("adminSecret").value, ...($("adminOtp").value && { otp: $("adminOtp").value.trim() }) }) });
+    if (r.role !== "admin") throw new Error("That account isn't an admin.");
+    token = r.accessToken;
+    try { sessionStorage.setItem("gwToken", token); } catch {}
+    $("adminSecret").value = "";
+    $("adminOtp").value = "";
+    show(true);
+    load();
+  } catch (err) {
+    $("loginError").textContent = err.message === "Invalid credentials" ? "Wrong admin ID, secret or code." : err.message;
+  } finally { btn.disabled = false; }
+};
+$("logout").onclick = logout;
+$("refresh").onclick = () => load();
+$("from").onchange = $("to").onchange = () => load();
+$("detailClose").onclick = () => ($("detailCard").hidden = true);
+
+function range() {
+  const q = new URLSearchParams();
+  if ($("from").value) q.set("from", $("from").value);
+  if ($("to").value) q.set("to", $("to").value + "T23:59:59.999Z");
+  return q;
+}
+
+async function load() {
+  $("refresh").disabled = true;
+  try {
+    const q = range();
+    const usage = (g) => api("/admin/usage?" + new URLSearchParams([...q, ["groupBy", g]]));
+    const [clients, byClient, byDay, byKey, keys] = await Promise.all([
+      api("/admin/clients"), usage("client"), usage("day"), usage("realKey"), api("/admin/keys"),
+    ]);
+    const f = $("from").value, t = $("to").value;
+    $("rangeLabel").textContent = f ? `From ${f}${t ? " to " + t : " to today"}, all clients.` : "All time, all clients.";
+    renderStats(clients, byClient.rows);
+    renderDaily(byDay.rows);
+    renderClients(clients, byClient.rows);
+    renderKeys(keys, byKey.rows);
+  } catch (err) { toast(err.message, true); }
+  finally { $("refresh").disabled = false; }
+}
+
+function renderStats(clients, rows) {
+  const sum = (k) => rows.reduce((s, r) => s + (r[k] || 0), 0);
+  const stats = [
+    ["Spend", usd(sum("cost_usd"))],
+    ["Requests", int(sum("requests"))],
+    ["Tokens", int(sum("input_tokens") + sum("output_tokens"))],
+    ["Errors", int(sum("errors"))],
+    ["Active clients", `${clients.filter((c) => c.status === "active").length} of ${clients.length}`],
+  ];
+  $("stats").replaceChildren(...stats.map(([l, v]) => el("div", { className: "stat" }, el("span", { textContent: l }), el("b", { textContent: v, title: v }))));
+}
+
+function renderDaily(rows) {
+  if (!rows.length) {
+    $("daily").replaceChildren(el("p", { className: "empty", textContent: "No requests in this range yet." }));
+    $("chartY").replaceChildren(); $("chartX").replaceChildren();
+    $("daily").style.alignItems = "center"; $("daily").style.justifyContent = "center";
+    return;
+  }
+  $("daily").style.alignItems = ""; $("daily").style.justifyContent = "";
+  const max = Math.max(...rows.map((r) => r.cost_usd), 0.000001);
+  const axis = (n) => "$" + (n >= 0.01 ? n.toFixed(2) : n.toPrecision(2));
+  $("chartY").replaceChildren(el("span", { textContent: axis(max) }), el("span", { textContent: axis(max / 2) }), el("span", { textContent: "$0" }));
+  $("daily").replaceChildren(...rows.map((r) => el("div", { className: "bar", style: `height:${Math.max(2, (r.cost_usd / max) * 100)}%` },
+    el("div", { className: "tip" }, el("b", { textContent: usd(r.cost_usd) }), `${r.grp} · ${int(r.requests)} requests`))));
+  // One label slot per bar; show every nth so labels never collide.
+  const every = Math.ceil(rows.length / 8);
+  $("chartX").replaceChildren(...rows.map((r, i) => el("span", { textContent: i % every === 0 ? r.grp.slice(5) : "" })));
+}
+
+function renderClients(clients, rangeRows) {
+  if (!clients.length) {
+    $("clients").replaceChildren(el("tr", {}, el("td", { colSpan: 8, className: "dim", textContent: "No clients yet. Create one below." })));
+    return;
+  }
+  const inRange = Object.fromEntries(rangeRows.map((r) => [r.grp, r]));
+  $("clients").replaceChildren(...clients.map((c) => {
+    const r = inRange[c.client_id] || {};
+    let budget;
+    if (c.monthly_budget_usd === null) budget = el("span", { className: "meter-text", textContent: "Unlimited" });
+    else {
+      const pct = Math.min(100, (c.month_spend_usd / (c.monthly_budget_usd || 1e-9)) * 100);
+      budget = el("span", { className: "meter", title: `${pct.toFixed(0)}% used` },
+        el("span", { className: "meter-track" }, el("span", { className: "meter-fill" + (pct >= 100 ? " over" : pct >= 80 ? " warn" : ""), style: `width:${pct}%` })),
+        el("span", { className: "meter-text", textContent: `${usd(c.month_spend_usd)} / ${usd(c.monthly_budget_usd)}` }));
+    }
+    const active = c.status === "active";
+    const actions = el("span", { className: "row" },
+      el("button", { className: "btn btn-sm", textContent: "Limits", onclick: () => editLimits(c) }),
+      el("button", { className: "btn btn-sm" + (active ? " btn-danger" : ""), textContent: active ? "Disable" : "Enable", onclick: () => toggle(c) }),
+      el("button", { className: "btn btn-sm", textContent: "Rotate secret", onclick: () => rotate(c) }),
+    );
+    return row([
+      el("div", { className: "who" },
+        el("button", { type: "button", className: "name link", textContent: c.name, title: "Show recent requests", onclick: () => details(c) }),
+        el("code", { className: "id", textContent: c.client_id })),
+      badge(c.status, active ? "Active" : "Disabled"),
+      { text: usd(r.cost_usd), cls: "num" }, budget,
+      { text: c.requests_per_minute ?? "Unlimited", cls: "num" }, { text: int(r.requests), cls: "num" },
+      { text: ago(c.last_used_at), cls: "dim" }, actions,
+    ]);
+  }));
+}
+
+function renderKeys(keys, rows) {
+  const byKey = Object.fromEntries(rows.map((r) => [r.grp, r]));
+  $("keys").replaceChildren(...keys.map((k) => {
+    const r = byKey[k.realKey] || {};
+    const status = k.restingUntil
+      ? el("span", { className: "row" }, badge("resting", "Resting"), el("span", { className: "dim", textContent: "until " + new Date(k.restingUntil).toLocaleTimeString() }))
+      : badge("ready", "Ready");
+    return row([
+      { text: "Key " + k.realKey, cls: "name" }, status, { text: int(r.requests), cls: "num" },
+      { text: usd(r.cost_usd), cls: "num" }, { text: int(r.errors), cls: "num" },
+    ]);
+  }));
+}
+
+const numOrNull = (v) => (v.trim() === "" ? null : Number(v));
+
+function editLimits(c) {
+  $("limitsFor").textContent = c.name;
+  $("limBudget").value = c.monthly_budget_usd ?? "";
+  $("limRpm").value = c.requests_per_minute ?? "";
+  const d = $("limitsDialog");
+  d.returnValue = "";
+  d.showModal();
+  d.addEventListener("close", async () => {
+    if (d.returnValue !== "save") return;
+    await patch(c.client_id, { monthlyBudgetUsd: numOrNull($("limBudget").value), requestsPerMinute: numOrNull($("limRpm").value) }, `Limits saved for ${c.name}.`);
+  }, { once: true });
+}
+
+async function toggle(c) {
+  if (c.status === "active") {
+    const ok = await confirmAction("Disable client?", `${c.name} is locked out on its next request, even with a valid token. You can enable it again later.`, "Disable");
+    if (!ok) return;
+    return patch(c.client_id, { status: "disabled" }, `${c.name} disabled.`);
+  }
+  return patch(c.client_id, { status: "active" }, `${c.name} enabled.`);
+}
+
+async function patch(id, body, message) {
+  try { await api("/admin/clients/" + id, { method: "PATCH", body: JSON.stringify(body) }); toast(message); load(); }
+  catch (err) { toast(err.message, true); }
+}
+
+function copyButton(value) {
+  const b = el("button", { type: "button", className: "btn btn-sm", textContent: "Copy" });
+  b.onclick = async () => {
+    try { await navigator.clipboard.writeText(value); b.textContent = "Copied"; setTimeout(() => (b.textContent = "Copy"), 1500); }
+    catch { toast("Couldn't copy. Select the text and copy it manually.", true); }
+  };
+  return b;
+}
+
+function showSecret(title, r) {
+  $("newSecret").replaceChildren(el("div", { className: "secret" },
+    el("div", { className: "secret-title", textContent: title }),
+    el("div", { className: "kv" }, el("span", { textContent: "Client ID" }), el("code", { textContent: r.clientId }), copyButton(r.clientId)),
+    el("div", { className: "kv" }, el("span", { textContent: "Client secret" }), el("code", { textContent: r.clientSecret }), copyButton(r.clientSecret)),
+    el("div", { className: "secret-note", textContent: "Copy the secret now and send it privately. It won't be shown again." })));
+  $("newSecret").scrollIntoView({ behavior: "smooth", block: "center" });
+}
+
+async function rotate(c) {
+  const ok = await confirmAction("Rotate secret?", `${c.name}'s current secret stops working immediately. Tokens already issued keep working until they expire.`, "Rotate secret");
+  if (!ok) return;
+  try { showSecret("New secret for " + c.name, await api(`/admin/clients/${c.client_id}/rotate-secret`, { method: "POST", body: "{}" })); }
+  catch (err) { toast(err.message, true); }
+}
+
+$("createForm").onsubmit = async (e) => {
+  e.preventDefault();
+  const body = { name: $("newName").value.trim() };
+  if (!body.name) return toast("Give the client a name.", true);
+  if ($("newBudget").value !== "") body.monthlyBudgetUsd = Number($("newBudget").value);
+  if ($("newRpm").value !== "") body.requestsPerMinute = Number($("newRpm").value);
+  const btn = e.submitter; btn.disabled = true;
+  try {
+    const r = await api("/admin/clients", { method: "POST", body: JSON.stringify(body) });
+    showSecret(`Created ${r.name}`, r);
+    e.target.reset();
+    load();
+  } catch (err) { toast(err.message, true); }
+  finally { btn.disabled = false; }
+};
+
+async function details(c) {
+  try {
+    const rows = await api("/admin/usage/" + c.client_id);
+    $("detailTitle").textContent = `Recent requests: ${c.name}`;
+    $("detail").replaceChildren(...(rows.length ? rows.map((u) => row([
+      { text: when(u.created_at), cls: "dim" }, { node: el("code", { textContent: u.model ?? "" }) }, "Key " + u.real_key,
+      { text: int(u.input_tokens), cls: "num" }, { text: int(u.output_tokens), cls: "num" },
+      { text: usd(u.cost_usd), cls: "num" }, { text: int(u.duration_ms) + " ms", cls: "num" },
+      badge(u.http_status === 200 ? "ready" : u.http_status === 429 ? "resting" : "disabled", String(u.http_status)),
+    ])) : [el("tr", {}, el("td", { colSpan: 8, className: "dim", textContent: "No requests yet." }))]));
+    $("detailCard").hidden = false;
+    $("detailCard").scrollIntoView({ behavior: "smooth" });
+  } catch (err) { toast(err.message, true); }
+}
+
+const now = new Date();
+$("from").value = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1)).toISOString().slice(0, 10);
+show(!!token);
+if (token) load();
+</script>
+</body>
+</html>
