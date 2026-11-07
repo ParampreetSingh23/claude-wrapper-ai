@@ -3,3 +3,10 @@ node_modules
 .env.*
 !.env.example
 data/
+.agents
+.claude 
+.impeccable
+
+# Docs (except README)
+*.md
+!README.md

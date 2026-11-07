@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Claude Gateway Admin</title>
+<title>GenAI Gateway Admin</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -163,7 +163,8 @@
 
   /* ---- create form + secret reveal ---- */
   .create { display: grid; grid-template-columns: 2fr 1fr 1fr auto; gap: 12px; align-items: end; }
-  @media (max-width: 720px) { .create { grid-template-columns: 1fr; } }
+  #createForm { grid-template-columns: 2fr 1fr 1fr auto auto; }
+  @media (max-width: 720px) { .create, #createForm { grid-template-columns: 1fr; } }
   .secret { margin-top: 20px; border: 1px solid color-mix(in srgb, var(--warning) 45%, var(--hairline)); background: var(--warning-soft);
     border-radius: 12px; padding: 16px; display: grid; gap: 12px; }
   .secret-title { font-weight: 600; color: var(--ink); }
@@ -214,7 +215,7 @@
 
 <div id="login" class="login-wrap" hidden>
   <form id="loginForm" class="panel login" novalidate>
-    <div class="brand"><span class="brand-mark"><svg viewBox="0 0 12 12" aria-hidden="true"><path d="M2 6h8M6 2v8" stroke="var(--on-ink)" stroke-width="1.6" stroke-linecap="round"/></svg></span>Claude Gateway</div>
+    <div class="brand"><span class="brand-mark"><svg viewBox="0 0 12 12" aria-hidden="true"><path d="M2 6h8M6 2v8" stroke="var(--on-ink)" stroke-width="1.6" stroke-linecap="round"/></svg></span>GenAI Gateway</div>
     <div>
       <h1>Admin sign in</h1>
       <p class="lede">Use the <code>ADMIN_ID</code> and <code>ADMIN_SECRET</code> from the server's .env.</p>
@@ -231,7 +232,7 @@
 <div id="app" hidden>
   <header class="topbar">
     <div class="topbar-inner">
-      <div class="brand"><span class="brand-mark"><svg viewBox="0 0 12 12" aria-hidden="true"><path d="M2 6h8M6 2v8" stroke="var(--on-ink)" stroke-width="1.6" stroke-linecap="round"/></svg></span>Claude Gateway<span class="brand-sep">/</span><span class="brand-sub">Admin</span></div>
+      <div class="brand"><span class="brand-mark"><svg viewBox="0 0 12 12" aria-hidden="true"><path d="M2 6h8M6 2v8" stroke="var(--on-ink)" stroke-width="1.6" stroke-linecap="round"/></svg></span>GenAI Gateway<span class="brand-sep">/</span><span class="brand-sub">Admin</span></div>
       <div class="controls">
         <div class="range">
           <input type="date" id="from" class="input" aria-label="From date">
@@ -255,6 +256,14 @@
     <div class="panel stats" id="stats"></div>
 
     <section class="section">
+      <div class="section-head"><h2>Providers</h2><p>Client budgets and rate limits are shared across both providers</p></div>
+      <div class="panel scroll-x"><table>
+        <thead><tr><th>Provider</th><th class="num">Requests</th><th class="num">Spend</th><th class="num">Errors</th></tr></thead>
+        <tbody id="providers"></tbody>
+      </table></div>
+    </section>
+
+    <section class="section">
       <div class="section-head"><h2>Daily spend</h2><p>Hover a bar for the day's totals</p></div>
       <div class="panel panel-pad">
         <div class="chart">
@@ -269,7 +278,7 @@
       <div class="section-head"><h2>Clients</h2><p>Click a name for recent requests. Budget bar is this calendar month (UTC)</p></div>
       <div class="panel scroll-x">
         <table>
-          <thead><tr><th>Client</th><th>Status</th><th class="num">Spend</th><th>Monthly budget</th>
+          <thead><tr><th>Client</th><th>Status</th><th>OpenAI access</th><th class="num">Spend</th><th>Monthly budget</th>
             <th class="num">Req / min</th><th class="num">Requests</th><th>Last used</th><th><span class="visually-hidden">Actions</span></th></tr></thead>
           <tbody id="clients"></tbody>
         </table>
@@ -283,6 +292,7 @@
           <label class="field">Name<input id="newName" class="input" placeholder="Priya, data team" required maxlength="100"></label>
           <label class="field">Budget, USD / month <span class="hint">empty = default</span><input id="newBudget" class="input" type="number" min="0" step="0.01" placeholder="50"></label>
           <label class="field">Requests / min <span class="hint">empty = default</span><input id="newRpm" class="input" type="number" min="1" step="1" placeholder="20"></label>
+          <label><input id="newOpenAI" type="checkbox"> Allow OpenAI</label>
           <button class="btn btn-primary" type="submit">Create client</button>
         </form>
         <div id="newSecret"></div>
@@ -299,11 +309,19 @@
       </div>
     </section>
 
+    <section class="section">
+      <div class="section-head"><h2>OpenAI keys</h2><p id="openaiStatus"></p></div>
+      <div class="panel scroll-x"><table>
+        <thead><tr><th>Key</th><th>Masked key</th><th>Status</th><th class="num">Requests</th><th class="num">Spend</th><th class="num">Errors</th></tr></thead>
+        <tbody id="openaiKeys"></tbody>
+      </table></div>
+    </section>
+
     <section class="section" id="detailCard" hidden>
       <div class="section-head"><h2 id="detailTitle"></h2><button class="btn btn-sm btn-ghost" id="detailClose" type="button">Close</button></div>
       <div class="panel scroll-x">
         <table>
-          <thead><tr><th>Time</th><th>Model</th><th>Key</th><th class="num">Input</th><th class="num">Output</th><th class="num">Cost</th><th class="num">Duration</th><th>Status</th></tr></thead>
+          <thead><tr><th>Time</th><th>Provider</th><th>Model</th><th>Key</th><th class="num">Input</th><th class="num">Output</th><th class="num">Cost</th><th class="num">Duration</th><th>Status</th></tr></thead>
           <tbody id="detail"></tbody>
         </table>
       </div>
@@ -341,7 +359,7 @@
 <script nonce="__CSP_NONCE__">
 const API = location.pathname.replace(/\/admin\/?$/, "");
 const $ = (id) => document.getElementById(id);
-const usd = (n) => "$" + Number(n || 0).toFixed(n && n < 1 ? 4 : 2);
+const usd = (n) => Number(n || 0).toLocaleString("en-US", { style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: 8 });
 const int = (n) => Number(n || 0).toLocaleString();
 const when = (iso) => (iso ? new Date(iso).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" }) : "Never");
 const ago = (iso) => {
@@ -438,15 +456,20 @@ async function load() {
   try {
     const q = range();
     const usage = (g) => api("/admin/usage?" + new URLSearchParams([...q, ["groupBy", g]]));
-    const [clients, byClient, byDay, byKey, keys] = await Promise.all([
-      api("/admin/clients"), usage("client"), usage("day"), usage("realKey"), api("/admin/keys"),
+    const [clients, byClient, byDay, byKey, keys, byProvider, openaiKeys] = await Promise.all([
+      api("/admin/clients"), usage("client"), usage("day"), usage("realKey"), api("/admin/keys"), usage("provider"), api("/admin/openai/keys"),
     ]);
     const f = $("from").value, t = $("to").value;
     $("rangeLabel").textContent = f ? `From ${f}${t ? " to " + t : " to today"}, all clients.` : "All time, all clients.";
     renderStats(clients, byClient.rows);
     renderDaily(byDay.rows);
     renderClients(clients, byClient.rows);
-    renderKeys(keys, byKey.rows);
+    renderKeys(keys, byKey.rows.filter((r) => r.provider === "anthropic"));
+    renderOpenAIKeys(openaiKeys, byKey.rows.filter((r) => r.provider === "openai"));
+    $("providers").replaceChildren(...["anthropic", "openai"].map((provider) => {
+      const r = byProvider.rows.find((r) => r.grp === provider) || {};
+      return row([provider === "anthropic" ? "Claude / Anthropic" : "OpenAI", { text: int(r.requests), cls: "num" }, { text: usd(r.cost_usd), cls: "num" }, { text: int(r.errors), cls: "num" }]);
+    }));
   } catch (err) { toast(err.message, true); }
   finally { $("refresh").disabled = false; }
 }
@@ -456,7 +479,7 @@ function renderStats(clients, rows) {
   const stats = [
     ["Spend", usd(sum("cost_usd"))],
     ["Requests", int(sum("requests"))],
-    ["Tokens", int(sum("input_tokens") + sum("output_tokens"))],
+    ["Tokens", int(sum("input_tokens") + sum("output_tokens") + sum("cache_read_tokens") + sum("cache_write_tokens"))],
     ["Errors", int(sum("errors"))],
     ["Active clients", `${clients.filter((c) => c.status === "active").length} of ${clients.length}`],
   ];
@@ -483,7 +506,7 @@ function renderDaily(rows) {
 
 function renderClients(clients, rangeRows) {
   if (!clients.length) {
-    $("clients").replaceChildren(el("tr", {}, el("td", { colSpan: 8, className: "dim", textContent: "No clients yet. Create one below." })));
+    $("clients").replaceChildren(el("tr", {}, el("td", { colSpan: 9, className: "dim", textContent: "No clients yet. Create one below." })));
     return;
   }
   const inRange = Object.fromEntries(rangeRows.map((r) => [r.grp, r]));
@@ -508,6 +531,7 @@ function renderClients(clients, rangeRows) {
         el("button", { type: "button", className: "name link", textContent: c.name, title: "Show recent requests", onclick: () => details(c) }),
         el("code", { className: "id", textContent: c.client_id })),
       badge(c.status, active ? "Active" : "Disabled"),
+      el("button", { type: "button", className: "btn btn-sm", textContent: c.openai_enabled ? "Revoke OpenAI" : "Grant OpenAI", onclick: () => patch(c.client_id, { openaiEnabled: !c.openai_enabled }, `OpenAI access ${c.openai_enabled ? "revoked" : "granted"} for ${c.name}.`) }),
       { text: usd(r.cost_usd), cls: "num" }, budget,
       { text: c.requests_per_minute ?? "Unlimited", cls: "num" }, { text: int(r.requests), cls: "num" },
       { text: ago(c.last_used_at), cls: "dim" }, actions,
@@ -530,6 +554,18 @@ function renderKeys(keys, rows) {
 }
 
 const numOrNull = (v) => (v.trim() === "" ? null : Number(v));
+
+function renderOpenAIKeys(data, rows) {
+  $("openaiStatus").textContent = data.configured ? `Model: ${data.model}. Keys are configured on the server; restart after changes.` : "OpenAI is unavailable. Configure a key on the server first.";
+  const byKey = Object.fromEntries(rows.map((r) => [r.grp, r]));
+  $("openaiKeys").replaceChildren(...(data.keys.length ? data.keys.map((k) => {
+    const r = byKey[k.id] || {};
+    return row([
+      "Key " + k.id, k.masked_key, k.restingUntil ? badge("resting", "Resting") : badge("ready", "Ready"),
+      { text: int(r.requests), cls: "num" }, { text: usd(r.cost_usd), cls: "num" }, { text: int(r.errors), cls: "num" },
+    ]);
+  }) : [el("tr", {}, el("td", { colSpan: 6, className: "dim", textContent: "No OpenAI keys configured." }))]));
+}
 
 function editLimits(c) {
   $("limitsFor").textContent = c.name;
@@ -577,7 +613,7 @@ function showSecret(title, r) {
 }
 
 async function rotate(c) {
-  const ok = await confirmAction("Rotate secret?", `${c.name}'s current secret stops working immediately. Tokens already issued keep working until they expire.`, "Rotate secret");
+  const ok = await confirmAction("Rotate secret?", `${c.name}'s current secret and token stop working immediately.`, "Rotate secret");
   if (!ok) return;
   try { showSecret("New secret for " + c.name, await api(`/admin/clients/${c.client_id}/rotate-secret`, { method: "POST", body: "{}" })); }
   catch (err) { toast(err.message, true); }
@@ -586,6 +622,7 @@ async function rotate(c) {
 $("createForm").onsubmit = async (e) => {
   e.preventDefault();
   const body = { name: $("newName").value.trim() };
+  body.openaiEnabled = $("newOpenAI").checked;
   if (!body.name) return toast("Give the client a name.", true);
   if ($("newBudget").value !== "") body.monthlyBudgetUsd = Number($("newBudget").value);
   if ($("newRpm").value !== "") body.requestsPerMinute = Number($("newRpm").value);
@@ -604,11 +641,11 @@ async function details(c) {
     const rows = await api("/admin/usage/" + c.client_id);
     $("detailTitle").textContent = `Recent requests: ${c.name}`;
     $("detail").replaceChildren(...(rows.length ? rows.map((u) => row([
-      { text: when(u.created_at), cls: "dim" }, { node: el("code", { textContent: u.model ?? "" }) }, "Key " + u.real_key,
+      { text: when(u.created_at), cls: "dim" }, u.provider, { node: el("code", { textContent: u.model ?? "" }) }, u.real_key === null ? "—" : "Key " + u.real_key,
       { text: int(u.input_tokens), cls: "num" }, { text: int(u.output_tokens), cls: "num" },
       { text: usd(u.cost_usd), cls: "num" }, { text: int(u.duration_ms) + " ms", cls: "num" },
       badge(u.http_status === 200 ? "ready" : u.http_status === 429 ? "resting" : "disabled", String(u.http_status)),
-    ])) : [el("tr", {}, el("td", { colSpan: 8, className: "dim", textContent: "No requests yet." }))]));
+    ])) : [el("tr", {}, el("td", { colSpan: 9, className: "dim", textContent: "No requests yet." }))]));
     $("detailCard").hidden = false;
     $("detailCard").scrollIntoView({ behavior: "smooth" });
   } catch (err) { toast(err.message, true); }

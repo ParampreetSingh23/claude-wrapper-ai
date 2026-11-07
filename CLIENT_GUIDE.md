@@ -1,7 +1,7 @@
-# Claude Gateway: Client Guide
+# GenAI Gateway: Client Guide
 
-This guide is for **people and apps that send prompts** to the company Claude Gateway.
-You don't need an Anthropic account or API key. The gateway handles that.
+This guide is for **people and apps that send prompts** to the company GenAI Gateway.
+You don't need an Anthropic or OpenAI account or API key. The gateway handles that. Claude uses `/send`; OpenAI uses `/openai/send` and requires an admin grant. Both use the same client login and token. Your monthly budget and requests-per-minute limit are shared across providers.
 
 ---
 
@@ -21,14 +21,14 @@ Lost the secret? Ask the admin to **rotate** it. They can't look it up; only a h
 ## 2. How it works in 30 seconds
 
 1. **Log in:** send your client ID + secret to `/token`. You get an **access token** valid for **60 minutes**.
-2. **Ask:** send prompts to `/send` with the token in the `Authorization` header. Reuse the same token for every request.
+2. **Ask:** send prompts to `/send` (Claude) or `/openai/send` (OpenAI) with the token in the `Authorization` header. Reuse the same token for every request. The diagrams below illustrate the Claude path.
 3. **Renew:** when the token is about to expire (or you get `401 Token expired`), log in again.
 
 ```mermaid
 sequenceDiagram
     autonumber
     participant You as Your app / Postman
-    participant G as Claude Gateway
+    participant G as GenAI Gateway
 
     rect rgb(230, 240, 255)
     Note over You,G: STEP 1: log in (once per 60 min)
@@ -131,9 +131,20 @@ curl -X POST $BASE/send \
 curl $BASE/me/usage -H 'Authorization: Bearer eyJhbGciOi...'
 ```
 
+**Ask OpenAI with the same token** (after the admin grants access):
+
+```bash
+curl -X POST $BASE/openai/send \
+  -H 'Content-Type: application/json' \
+  -H 'Authorization: Bearer eyJhbGciOi...' \
+  -d '{"prompt":"Explain what an API is in 2 lines","systemPrompt":"Be concise."}'
+```
+
 ---
 
 ## 4. Quick start with Postman
+
+For admin, client, security, limits, key failover and reporting checks, follow [POSTMAN_GUIDE.md](POSTMAN_GUIDE.md).
 
 1. **Token request**
    - `POST {{BASE}}/token`
@@ -221,10 +232,25 @@ All paths are relative to the base URL. Requests and responses are JSON. Send `C
 ```
 
 `monthlyBudgetUsd` / `requestsPerMinute` = `null` means no limit. Months are calendar months in **UTC**.
+`spentUsd`, `requests`, and `remainingUsd` include both Claude and OpenAI. The budget check uses completed recorded spend; in-flight requests can exceed the remaining allowance.
 
 ### 5.4 `GET /health`: is the gateway up
 
 No auth. Returns `{"status":"ok", ...}`.
+
+### 5.5 `POST /openai/send`: ask OpenAI
+
+Uses the same token and `{prompt, systemPrompt?}` body as `/send`, with the same per-field character limits. The admin must enable OpenAI access for your client; a valid token alone is insufficient. Access changes take effect on the next request without logging in again.
+
+The success response has the same fields as `/send`. Differences:
+
+- `model`: the configured OpenAI model (default `gpt-4.1-mini`, which may be returned as its dated snapshot).
+- `stopReason`: `completed` for a finished answer; `max_output_tokens` for partial output at the output cap. Other incomplete reasons may also be returned.
+- `usage.inputTokens`: uncached input tokens. `cacheReadTokens` records cached input separately; `cacheWriteTokens` is zero. Their sum plus `outputTokens` equals `totalTokens`.
+- `usage.costUsd`: estimated cost using cached/uncached input and output prices. Refusals return `422` with usage and cost.
+- `503`: OpenAI has no configured keys; contact the admin.
+
+Each request is independent. There is no OpenAI SDK compatibility, client streaming, tools, file/image inputs, conversation ID, or per-request model selection. To adapt the JavaScript/Python examples below for OpenAI, replace `/send` with `/openai/send`.
 
 ---
 
@@ -243,12 +269,15 @@ Every error has a JSON body with an `error` message.
 | 402 | `Monthly budget exceeded` | You've used your monthly budget (`budgetUsd`, `spentUsd` included) | Ask the admin to raise it, or wait for next month (UTC) |
 | 403 | `Origin not allowed` | Called from a web page on a site that isn't approved | Ask the admin to add your site, or call from your backend |
 | 403 | `Use a client account for this route` | Used an admin token on `/send` | Use a client ID + secret |
+| 403 | `OpenAI access is not enabled for this client` | Admin has not granted access or revoked it | Ask the admin |
 | 429 | `Too many failed logins. Try again later.` | 5 failed `/token` attempts from your IP in 15 min | Wait `retryAfterSeconds`; check your ID and secret |
 | 429 | `Rate limit: N requests per minute` | You sent too many requests in the last minute | Wait `retryAfterSeconds` (also in the `retry-after` header) |
 | 429 | `All real keys are rate limited, retry later` | Company-wide Anthropic limit hit | Wait ~30–60 s and retry |
-| 502 | `Upstream AI error` | Claude/Anthropic failed | Retry later; if it keeps happening, tell the admin |
+| 429 | `OpenAI keys are rate limited, retry later` | OpenAI keys are throttled or cooling down | Wait before retrying |
+| 502 | `Upstream AI error` | Provider failure, timeout, disconnect, or invalid response | Check before resubmitting; the provider may already have charged |
+| 503 | `OpenAI has no configured keys` | No numbered OpenAI keys configured in the server environment | Contact the admin |
 
-**Safe to retry automatically:** `401 Token expired` (after a new login), `429`, `502`. For `401 Token replaced by a newer login`, log in again once; if it keeps happening, two programs are sharing your client ID.
+**Automatic retries:** `401 Token expired` (after a new login), or `429` after waiting. A `502` can mean the provider processed the request before a timeout/disconnect; resubmitting may incur another charge. For `401 Token replaced by a newer login`, log in again once; if it keeps happening, two programs are sharing your client ID.
 **Don't retry:** `400`, `401 Invalid credentials`, `401 Client disabled`, `402`, `403`.
 
 ---
@@ -291,7 +320,6 @@ export async function ask(prompt: string, systemPrompt?: string) {
     if (res.ok) return body; // { output, usage, timestamp, ... }
     if (res.status === 401 && body.error === "Token expired") { token = null; continue; }
     if (res.status === 429) { await sleep((body.retryAfterSeconds ?? 30) * 1000); continue; }
-    if (res.status === 502) { await sleep(2000 * attempt); continue; }
     throw new Error(`${res.status}: ${body.error ?? body.message}`); // 400, 402, 403, other 401
   }
   throw new Error("Gave up after 3 attempts");
@@ -341,9 +369,6 @@ def ask(prompt: str, system_prompt: str | None = None) -> dict:
         if r.status_code == 429:
             time.sleep(body.get("retryAfterSeconds", 30))
             continue
-        if r.status_code == 502:
-            time.sleep(2 * attempt)
-            continue
         raise RuntimeError(f"{r.status_code}: {body.get('error') or body.get('message')}")  # 400, 402, 403, other 401
     raise RuntimeError("Gave up after 3 attempts")
 
@@ -370,7 +395,7 @@ if __name__ == "__main__":
 **Cost**
 - Every response tells you its `costUsd`. Check `/me/usage` to see your monthly total.
 - Shorter prompts and asking for shorter answers cost less.
-- Requests that fail on the gateway side (`502`) cost nothing.
+- A `502` is recorded with zero estimated cost when usage is unknown; the provider may still have charged. Ask the admin to reconcile upstream billing.
 
 **Timeouts**
 - Long answers can take a while. Allow at least **60 seconds** (up to 10 minutes for very long outputs) before your HTTP client gives up.
@@ -379,14 +404,14 @@ if __name__ == "__main__":
 
 ## 9. FAQ
 
-**Can I see which Anthropic key or model was used?** The model is in the `model` field. The key is internal; the admin can see it.
+**Can I see which provider key or model was used?** The model is in the `model` field. The key is internal; the admin sees only masked OpenAI key details.
 
 **Does the gateway keep my prompts?** No. It stores only token counts, cost, timing and status for each request, not the text.
 
-**Can I have a conversation (multiple turns)?** Each `/send` is independent; Claude doesn't remember earlier requests. To continue a conversation, include the relevant earlier text in your `prompt`.
+**Can I have a conversation (multiple turns)?** Each `/send` or `/openai/send` is independent. Include the relevant earlier text in your `prompt`.
 
 **Can I pick the model or settings (temperature, etc.)?** Not per request. The admin sets the model and settings for the whole gateway.
 
-**My answer ends mid-sentence.** `stopReason` is probably `max_tokens`: the answer hit the length limit. Ask for a shorter answer, or ask the admin about the limit.
+**My answer ends mid-sentence.** `stopReason` may be `max_tokens` (Claude) or `max_output_tokens` (OpenAI): the answer hit the output limit. Ask for a shorter answer, or ask the admin about the limit.
 
 **Who do I contact?** Your gateway admin: _<add name / channel here>_.

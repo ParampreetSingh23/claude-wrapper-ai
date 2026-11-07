@@ -5,9 +5,10 @@ import type { FastifyReply, FastifyRequest } from "fastify";
 import fastifyJwt from "@fastify/jwt";
 import type Anthropic from "@anthropic-ai/sdk";
 import { openDb } from "./db.ts";
-import type { Client, GroupBy } from "./db.ts";
+import type { Client, GroupBy, Provider } from "./db.ts";
 import { costUsd, createKeyPool, UpstreamError } from "./claude.ts";
 import { createTotpVerifier } from "./totp.ts";
+import { createOpenAIService, OpenAIError } from "./openai.ts";
 
 const env = process.env;
 const optionalNumber = (v: string | undefined) => (v ? Number(v) : null);
@@ -39,8 +40,6 @@ const config = {
   tokenTtlMinutes: Number(env.TOKEN_TTL_MINUTES ?? 60),
   adminId: env.ADMIN_ID ?? "",
   adminSecret: env.ADMIN_SECRET ?? "",
-  // Admin hardening. Empty ADMIN_ALLOWED_IPS = any IP (a warning is logged).
-  adminAllowedIps: (env.ADMIN_ALLOWED_IPS ?? "").split(",").map((s) => s.trim()).filter(Boolean),
   adminTotpSecret: env.ADMIN_TOTP_SECRET || undefined,
   adminTokenTtlMinutes: Number(env.ADMIN_TOKEN_TTL_MINUTES ?? 15),
   loginMaxFailures: Number(env.LOGIN_MAX_FAILURES ?? 5),
@@ -70,11 +69,19 @@ const monthStart = () => {
   const d = new Date();
   return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1)).toISOString();
 };
-const round6 = (n: number) => Math.round(n * 1e6) / 1e6;
+const roundUsd = (n: number) => Math.round(n * 1e8) / 1e8;
 
 const db = openDb(config.dbPath);
 const app = Fastify({ logger: true, bodyLimit: 1024 * 1024, trustProxy: config.trustProxy });
 const pool = createKeyPool(realKeys, config.timeoutMs, (msg, extra) => app.log.warn(extra, msg));
+const openaiKeys = Array.from({ length: 5 }, (_, i) => ({ id: i + 1, apiKey: env[`OPENAI_KEY_${i + 1}`]?.trim() || "" }))
+  .filter((key) => key.apiKey);
+const openai = createOpenAIService(openaiKeys, {
+  model: env.OPENAI_MODEL || "gpt-4.1-mini",
+  maxTokens: Number(env.OPENAI_MAX_TOKENS || 4096),
+  timeoutMs: Number(env.OPENAI_TIMEOUT_MS || 60000),
+  baseUrl: env.OPENAI_BASE_URL || "https://api.openai.com/v1",
+});
 const adminPage = readFileSync(new URL("./admin.html", import.meta.url), "utf8");
 
 type Role = "admin" | "client";
@@ -131,11 +138,7 @@ app.addHook("onSend", async (req, reply, payload) => {
   return payload;
 });
 
-// ---------- admin access + login protection ----------
-
-const normalizeIp = (ip: string) => ip.replace(/^::ffff:/, "");
-const adminIpAllowed = (ip: string) =>
-  !config.adminAllowedIps.length || config.adminAllowedIps.includes(normalizeIp(ip));
+// ---------- login protection ----------
 
 // ponytail: in-memory, per process; a restart clears lockouts. Fine for one server.
 const failedLogins = new Map<string, number[]>(); // ip -> failure times
@@ -172,7 +175,6 @@ let adminTokenId: string | null = null;
 const REPLACED = { error: "Token replaced by a newer login" };
 
 async function requireAdmin(req: FastifyRequest, reply: FastifyReply) {
-  if (!adminIpAllowed(req.ip)) return reply.callNotFound(); // don't even reveal the admin API exists
   if (!(await verifyToken(req, reply))) return reply;
   if (req.user.role !== "admin") return reply.code(403).send({ error: "Admin only" });
   if (req.user.jti !== adminTokenId) return reply.code(401).send(REPLACED);
@@ -189,6 +191,10 @@ async function requireClient(req: FastifyRequest, reply: FastifyReply) {
   req.client = client;
 }
 
+async function requireOpenAI(req: FastifyRequest, reply: FastifyReply) {
+  if (!req.client!.openai_enabled) return reply.code(403).send({ error: "OpenAI access is not enabled for this client" });
+}
+
 // ponytail: in-memory sliding window, per process; resets on restart. Move to Redis if you run several instances.
 const recentRequests = new Map<string, number[]>();
 
@@ -197,7 +203,7 @@ async function enforceLimits(req: FastifyRequest, reply: FastifyReply) {
   if (c.monthly_budget_usd !== null) {
     const { spend } = db.spendSince(c.client_id, monthStart());
     if (spend >= c.monthly_budget_usd) {
-      return reply.code(402).send({ error: "Monthly budget exceeded", budgetUsd: c.monthly_budget_usd, spentUsd: round6(spend) });
+      return reply.code(402).send({ error: "Monthly budget exceeded", budgetUsd: c.monthly_budget_usd, spentUsd: roundUsd(spend) });
     }
   }
   if (c.requests_per_minute !== null) {
@@ -220,12 +226,13 @@ async function enforceLimits(req: FastifyRequest, reply: FastifyReply) {
 
 type TokenBody = { clientId: string; clientSecret: string; otp?: string };
 type SendBody = { prompt: string; systemPrompt?: string };
-type CreateClientBody = { name: string; monthlyBudgetUsd?: number | null; requestsPerMinute?: number | null };
+type CreateClientBody = { name: string; monthlyBudgetUsd?: number | null; requestsPerMinute?: number | null; openaiEnabled?: boolean };
 type PatchClientBody = {
   name?: string;
   status?: "active" | "disabled";
   monthlyBudgetUsd?: number | null;
   requestsPerMinute?: number | null;
+  openaiEnabled?: boolean;
 };
 
 const limitProps = {
@@ -273,10 +280,9 @@ app.register(
         let role: Role;
         if (clientId === config.adminId) {
           const secretOk = sameHash(given, sha256(config.adminSecret));
-          // All three checked every time; one generic error so a guesser learns nothing about which part was wrong.
-          const ipOk = adminIpAllowed(req.ip);
+          // One generic error so a guesser learns nothing about which credential was wrong.
           const otpOk = verifyAdminTotp ? secretOk && verifyAdminTotp(otp) : true;
-          if (!secretOk || !ipOk || !otpOk) return fail(!ipOk ? "admin ip not allowed" : !secretOk ? "admin secret" : "admin otp");
+          if (!secretOk || !otpOk) return fail(!secretOk ? "admin secret" : "admin otp");
           role = "admin";
         } else {
           const c = db.getClient(clientId);
@@ -364,7 +370,7 @@ app.register(
             cacheWriteTokens,
             cacheReadTokens,
             totalTokens: u.input_tokens + cacheWriteTokens + cacheReadTokens + u.output_tokens,
-            costUsd: round6(cost),
+            costUsd: roundUsd(cost),
           };
           if (refused) {
             return reply.code(422).send({ error: "Request declined by model", details: message.stop_details, usage, timestamp, durationMs });
@@ -405,18 +411,59 @@ app.register(
         clientId: c.client_id,
         name: c.name,
         monthStart: since,
-        spentUsd: round6(spend),
+        spentUsd: roundUsd(spend),
         requests,
         monthlyBudgetUsd: c.monthly_budget_usd,
-        remainingUsd: c.monthly_budget_usd === null ? null : round6(Math.max(0, c.monthly_budget_usd - spend)),
+        remainingUsd: c.monthly_budget_usd === null ? null : roundUsd(Math.max(0, c.monthly_budget_usd - spend)),
         requestsPerMinute: c.requests_per_minute,
       };
+    });
+
+    r.post<{ Body: SendBody }>("/openai/send", {
+      onRequest: [requireClient, requireOpenAI],
+      preHandler: enforceLimits,
+      schema: {
+        body: {
+          type: "object", required: ["prompt"], additionalProperties: false,
+          properties: {
+            prompt: { type: "string", minLength: 1, maxLength: config.maxPromptChars },
+            systemPrompt: { type: "string", maxLength: config.maxPromptChars },
+          },
+        },
+      },
+    }, async (req, reply) => {
+      const client = req.client!;
+      const startedAt = Date.now();
+      try {
+        const result = await openai.send(req.body.prompt, req.body.systemPrompt || config.defaultSystemPrompt);
+        const timestamp = new Date().toISOString();
+        const durationMs = Date.now() - startedAt;
+        db.insertUsage({
+          provider: "openai", client_id: client.client_id, real_key: result.keyId, model: result.model,
+          input_tokens: result.usage.inputTokens, output_tokens: result.usage.outputTokens,
+          cache_read_tokens: result.usage.cacheReadTokens, cache_write_tokens: 0,
+          cost_usd: result.usage.costUsd, duration_ms: durationMs, http_status: result.httpStatus, created_at: timestamp,
+        });
+        db.touchClient(client.client_id, timestamp);
+        const usage = { ...result.usage, costUsd: roundUsd(result.usage.costUsd) };
+        if (result.httpStatus === 422) return reply.code(422).send({ error: "Request declined by model", usage, timestamp, durationMs });
+        return { output: result.output, model: result.model, stopReason: result.stopReason, usage, timestamp, durationMs };
+      } catch (err) {
+        if (!(err instanceof OpenAIError)) throw err;
+        const status = err.status === 503 && err.keyId === null ? 503 : err.status === 429 ? 429 : 502;
+        req.log.warn({ status: err.status, realKey: err.keyId }, "OpenAI request failed");
+        db.insertUsage({
+          provider: "openai", client_id: client.client_id, real_key: err.keyId, model: openai.model,
+          input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0, cost_usd: 0,
+          duration_ms: Date.now() - startedAt, http_status: status, created_at: new Date().toISOString(),
+        });
+        return reply.code(status).send({ error: status === 503 ? err.message : status === 429 ? "OpenAI keys are rate limited, retry later" : "Upstream AI error" });
+      }
     });
 
     // ---------- admin ----------
 
     r.get("/admin", async (req, reply) => {
-      if (!adminIpAllowed(req.ip)) return reply.callNotFound();
       // Only this response's own inline script may run: blocks injected scripts from stealing the admin token.
       const nonce = randomBytes(16).toString("base64");
       return reply
@@ -450,7 +497,7 @@ app.register(
             body: {
               type: "object",
               required: ["name"],
-              properties: { name: { type: "string", minLength: 1, maxLength: 100 }, ...limitProps },
+              properties: { name: { type: "string", minLength: 1, maxLength: 100 }, openaiEnabled: { type: "boolean" }, ...limitProps },
             },
           },
         },
@@ -467,12 +514,14 @@ app.register(
             created_at: new Date().toISOString(),
           };
           db.insertClient(client);
+          if (req.body.openaiEnabled) db.updateClient(clientId, { openai_enabled: 1 });
           return reply.code(201).send({
             clientId,
             clientSecret,
             name,
             monthlyBudgetUsd: client.monthly_budget_usd,
             requestsPerMinute: client.requests_per_minute,
+            openaiEnabled: Boolean(req.body.openaiEnabled),
             note: "Store clientSecret now. It is never shown again.",
           });
         },
@@ -489,6 +538,7 @@ app.register(
               properties: {
                 name: { type: "string", minLength: 1, maxLength: 100 },
                 status: { type: "string", enum: ["active", "disabled"] },
+                openaiEnabled: { type: "boolean" },
                 ...limitProps,
               },
             },
@@ -502,6 +552,7 @@ app.register(
             ...(b.status !== undefined && { status: b.status }),
             ...(b.monthlyBudgetUsd !== undefined && { monthly_budget_usd: b.monthlyBudgetUsd }),
             ...(b.requestsPerMinute !== undefined && { requests_per_minute: b.requestsPerMinute }),
+            ...(b.openaiEnabled !== undefined && { openai_enabled: b.openaiEnabled ? 1 : 0 }),
           });
           const { secret_hash, token_id, ...client } = db.getClient(req.params.id)!;
           return client;
@@ -516,7 +567,7 @@ app.register(
         return { clientId: req.params.id, clientSecret, note: "Old secret and its token no longer work. Store this one now." };
       });
 
-      a.get<{ Querystring: { from?: string; to?: string; groupBy?: GroupBy } }>(
+      a.get<{ Querystring: { from?: string; to?: string; groupBy?: GroupBy; provider?: Provider } }>(
         "/admin/usage",
         {
           schema: {
@@ -525,7 +576,8 @@ app.register(
               properties: {
                 from: { type: "string", pattern: "^\\d{4}-\\d{2}-\\d{2}" },
                 to: { type: "string", pattern: "^\\d{4}-\\d{2}-\\d{2}" },
-                groupBy: { type: "string", enum: ["client", "realKey", "day", "model"], default: "client" },
+                groupBy: { type: "string", enum: ["client", "realKey", "day", "model", "provider"], default: "client" },
+                provider: { type: "string", enum: ["anthropic", "openai"] },
               },
             },
           },
@@ -534,19 +586,22 @@ app.register(
           const from = req.query.from ?? monthStart();
           const to = req.query.to ?? "9999-12-31";
           const groupBy = req.query.groupBy ?? "client";
-          return { from, to, groupBy, rows: db.usageSummary(from, to, groupBy) };
+          return { from, to, groupBy, rows: db.usageSummary(from, to, groupBy, req.query.provider) };
         },
       );
 
       a.get<{ Params: { id: string } }>("/admin/usage/:id", async (req) => db.recentUsage(req.params.id, 50));
 
       a.get("/admin/keys", async () => pool.status());
+
+      a.get("/admin/openai/keys", async () => ({ configured: openai.configured, model: openai.model, keys: openai.status() }));
+
+
     });
   },
   { prefix: "/api/assistant" },
 );
 
-if (!config.adminAllowedIps.length) app.log.warn("ADMIN_ALLOWED_IPS is empty: the admin can log in from any IP");
 if (!verifyAdminTotp) app.log.warn("ADMIN_TOTP_SECRET is not set: admin login is password-only (run `npm run admin:2fa`)");
 
 await app.listen({ port: config.port, host: env.HOST ?? "127.0.0.1" });

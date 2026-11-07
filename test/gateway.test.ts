@@ -84,7 +84,6 @@ before(async () => {
   fakeUrl = `http://127.0.0.1:${(fake.address() as { port: number }).port}`;
   dir = mkdtempSync(join(tmpdir(), "gateway-test-"));
   gateway = await startGateway(PORT, {
-    ADMIN_ALLOWED_IPS: "127.0.0.1,::1",
     ADMIN_TOTP_SECRET: TOTP_SECRET,
     LOGIN_MAX_FAILURES: "8",
   });
@@ -148,6 +147,17 @@ test("full flow: admin, clients, limits, failover, expiry", async () => {
   // Role separation
   assert.equal((await call("GET", "/admin/clients", undefined, token)).status, 403);
   assert.equal((await call("POST", "/send", { prompt: "hi" }, admin)).status, 403);
+  assert.equal((await call("PATCH", `/admin/clients/${clientId}`, { openaiEnabled: true }, token)).status, 403);
+  assert.equal((await call("PATCH", `/admin/clients/${clientId}`, { openaiEnabled: true })).status, 401);
+
+  // Editing browser state or changing a token's role cannot grant server-side admin access.
+  const [header, payload, signature] = token.split(".");
+  const forgedPayload = { ...JSON.parse(Buffer.from(payload!, "base64url").toString()), role: "admin" };
+  const forgedToken = [header, Buffer.from(JSON.stringify(forgedPayload)).toString("base64url"), signature].join(".");
+  assert.equal((await call("GET", "/admin/clients", undefined, forgedToken)).status, 401);
+  assert.equal((await call("PATCH", `/admin/clients/${clientId}`, { openaiEnabled: true }, forgedToken)).status, 401);
+  const unchanged = (await call("GET", "/admin/clients", undefined, admin)).body.find((c: any) => c.client_id === clientId);
+  assert.equal(unchanged.openai_enabled, 0);
 
   // Origin: none (script) ok, allowed ok, other site blocked
   assert.equal((await call("POST", "/send", { prompt: "hi" }, token, { origin: "http://evil.test" })).status, 403);
@@ -226,19 +236,31 @@ test("full flow: admin, clients, limits, failover, expiry", async () => {
   assert.equal((await call("POST", "/token", { clientId, clientSecret: rotated.clientSecret })).status, 429);
 });
 
-test("admin is invisible and unusable from an IP that isn't allowed", async () => {
+test("admin works from any IP, ignores the old allowlist, and still requires authentication", async () => {
   const port = PORT + 1;
-  const other = await startGateway(port, { ADMIN_ALLOWED_IPS: "10.9.9.9" });
+  const other = await startGateway(port, { ADMIN_ALLOWED_IPS: "10.9.9.9", TRUST_PROXY: "true" });
   try {
     const base = `http://127.0.0.1:${port}/api/assistant`;
-    assert.equal((await fetch(`${base}/admin`)).status, 404);
+    const headers = { "content-type": "application/json", "x-forwarded-for": "198.51.100.10" };
+    assert.equal((await fetch(`${base}/admin`, { headers })).status, 200);
+    const wrong = await fetch(`${base}/token`, {
+      method: "POST", headers, body: JSON.stringify({ ...ADMIN, clientSecret: "wrong" }),
+    });
+    assert.equal(wrong.status, 401);
+    assert.equal((await fetch(`${base}/admin/clients`, { headers })).status, 401);
+    assert.equal((await fetch(`${base}/admin/openai/keys`, { headers })).status, 401);
     const res = await fetch(`${base}/token`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers,
       body: JSON.stringify(ADMIN),
     });
-    assert.equal(res.status, 401); // right password, wrong place: same answer as a wrong password
-    assert.equal((await fetch(`${base}/admin/clients`)).status, 404);
+    assert.equal(res.status, 200);
+    const { accessToken } = await res.json() as { accessToken: string };
+    for (const ip of ["198.51.100.10", "203.0.113.20"]) {
+      const authHeaders = { authorization: `Bearer ${accessToken}`, "x-forwarded-for": ip };
+      assert.equal((await fetch(`${base}/admin/clients`, { headers: authHeaders })).status, 200);
+      assert.equal((await fetch(`${base}/admin/openai/keys`, { headers: authHeaders })).status, 200);
+    }
   } finally {
     other.kill();
   }
