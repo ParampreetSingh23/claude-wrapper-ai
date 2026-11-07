@@ -101,7 +101,7 @@ async function call(method: string, path: string, body?: unknown, token?: string
     headers: { "content-type": "application/json", ...(token && { authorization: `Bearer ${token}` }), ...headers },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
-  return { status: res.status, body: (await res.json().catch(() => null)) as any };
+  return { status: res.status, headers: res.headers, body: (await res.json().catch(() => null)) as any };
 }
 const login = async (creds: object) => (await call("POST", "/token", creds)).body.accessToken as string;
 
@@ -134,14 +134,20 @@ test("full flow: admin, clients, limits, failover, expiry", async () => {
   // Client login; wrong secret and unknown id both rejected the same way (failures 4, 5)
   assert.equal((await call("POST", "/token", { clientId, clientSecret: "nope" })).status, 401);
   assert.equal((await call("POST", "/token", { clientId: "cl_missing", clientSecret })).status, 401);
-  let token = await login({ clientId, clientSecret });
+  const clientLogin = await call("POST", "/token", { clientId, clientSecret });
+  assert.equal(clientLogin.status, 200);
+  let token = clientLogin.body.accessToken;
 
-  // One live token per client: logging in again cancels the previous token
-  const newer = await login({ clientId, clientSecret });
-  const old = await call("GET", "/me/usage", undefined, token);
-  assert.equal(old.status, 401);
-  assert.equal(old.body.error, "Token replaced by a newer login");
-  token = newer;
+  // Repeated login cannot replace the token or extend its original expiry.
+  const duplicate = await call("POST", "/token", { clientId, clientSecret });
+  assert.equal(duplicate.status, 409);
+  assert.equal(duplicate.body.error, "Client already has an active token");
+  assert.equal(duplicate.body.expiresAt, clientLogin.body.expiresAt);
+  assert.equal(duplicate.body.accessToken, undefined);
+  assert.ok(duplicate.body.retryAfterSeconds > 0);
+  assert.equal(duplicate.headers.get("retry-after"), String(duplicate.body.retryAfterSeconds));
+  const { exp } = JSON.parse(Buffer.from(token.split(".")[1], "base64url").toString());
+  assert.equal(clientLogin.body.expiresAt, new Date(exp * 1000).toISOString());
   assert.equal((await call("GET", "/me/usage", undefined, token)).status, 200);
 
   // Role separation
@@ -202,7 +208,7 @@ test("full flow: admin, clients, limits, failover, expiry", async () => {
 
   // Rotate secret: old secret refused, the token issued with it is cancelled too, new secret works
   const rotated = (await call("POST", `/admin/clients/${clientId}/rotate-secret`, {}, admin)).body;
-  assert.equal((await call("GET", "/me/usage", undefined, token)).body.error, "Token replaced by a newer login");
+  assert.equal((await call("GET", "/me/usage", undefined, token)).body.error, "Token revoked");
   assert.equal((await call("POST", "/token", { clientId, clientSecret })).status, 401);
   token = await login({ clientId, clientSecret: rotated.clientSecret });
   assert.ok(token);
@@ -221,6 +227,10 @@ test("full flow: admin, clients, limits, failover, expiry", async () => {
   const expired = await call("POST", "/send", { prompt: "hi" }, token);
   assert.equal(expired.status, 401);
   assert.equal(expired.body.error, "Token expired");
+  const renewed = await call("POST", "/token", { clientId, clientSecret: rotated.clientSecret });
+  assert.equal(renewed.status, 200);
+  assert.notEqual(renewed.body.accessToken, token);
+  assert.equal((await call("GET", "/me/usage", undefined, renewed.body.accessToken)).status, 200);
 
   // Admin: a second sign-in (next 30 s code, since codes are single-use) cancels the first admin token
   const admin2 = await login({ ...ADMIN, otp: totpCode(base32Decode(TOTP_SECRET), currentStep() + 1) });
@@ -234,6 +244,49 @@ test("full flow: admin, clients, limits, failover, expiry", async () => {
   assert.equal(locked.status, 429);
   assert.ok(locked.body.retryAfterSeconds > 0);
   assert.equal((await call("POST", "/token", { clientId, clientSecret: rotated.clientSecret })).status, 429);
+});
+
+test("concurrent client logins issue one token and the expiry lock survives restart", async () => {
+  const port = PORT + 2;
+  const settings = { TOKEN_TTL_MINUTES: "60", ONE_TOKEN_PER_CLIENT: "false" };
+  let other = await startGateway(port, settings);
+  const base = `http://127.0.0.1:${port}/api/assistant`;
+  const post = async (path: string, body: unknown, token?: string) => {
+    const res = await fetch(base + path, {
+      method: "POST",
+      headers: { "content-type": "application/json", ...(token && { authorization: `Bearer ${token}` }) },
+      body: JSON.stringify(body),
+    });
+    return { status: res.status, body: await res.json() as any };
+  };
+  try {
+    const admin = (await post("/token", ADMIN)).body.accessToken;
+    const client = (await post("/admin/clients", { name: "Concurrent logins" }, admin)).body;
+    const results = await Promise.all(Array.from({ length: 12 }, () => post("/token", client)));
+    const winner = results.filter((r) => r.status === 200);
+    assert.equal(winner.length, 1);
+    assert.equal(results.filter((r) => r.status === 409).length, 11);
+    for (const r of results.filter((r) => r.status === 409)) {
+      assert.equal(r.body.expiresAt, winner[0]!.body.expiresAt);
+      assert.equal(r.body.accessToken, undefined);
+    }
+    // A conflict is not a failed credential attempt, even after more than five conflicts.
+    assert.equal((await post("/token", client)).status, 409);
+    const wrong = await post("/token", { ...client, clientSecret: "wrong" });
+    assert.equal(wrong.status, 401);
+    assert.deepEqual(wrong.body, { error: "Invalid credentials" });
+    const closed = new Promise<void>((resolve) => other.once("exit", () => resolve()));
+    other.kill();
+    await closed;
+    other = await startGateway(port, settings);
+    const afterRestart = await post("/token", client);
+    assert.equal(afterRestart.status, 409);
+    assert.equal(afterRestart.body.expiresAt, winner[0]!.body.expiresAt);
+    const me = await fetch(base + "/me/usage", { headers: { authorization: `Bearer ${winner[0]!.body.accessToken}` } });
+    assert.equal(me.status, 200);
+  } finally {
+    other.kill();
+  }
 });
 
 test("admin works from any IP, ignores the old allowlist, and still requires authentication", async () => {

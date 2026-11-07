@@ -8,7 +8,7 @@ Status: implemented. Claude remains at `/api/assistant/send`; OpenAI is added at
 |---|---|
 | Client API | Same `{prompt, systemPrompt?}` body and normalized output/usage envelope |
 | OpenAI upstream | Responses API through native `fetch`, `store: false` |
-| Authentication | Existing `/token`, JWT verification, client disablement and token replacement |
+| Authentication | Client `/token` returns `409` until its current token expires; atomic DB claim; admin session replacement unchanged |
 | Authorization | `clients.openai_enabled`, off by default; checked on every OpenAI request |
 | Limits | Existing monthly budget and sliding per-minute counter, shared across providers |
 | Admin | Existing dashboard, access from any IP, 2FA, roles and session controls |
@@ -34,9 +34,9 @@ OpenAI's input count includes cached tokens; the gateway stores and returns unca
 
 ## Migration and compatibility
 
-- Existing clients keep their IDs, secrets, limits, tokens, and Claude access. OpenAI grants default to off.
+- Existing clients keep their IDs, secrets, limits, grants, and Claude access. New OpenAI grants default to off. Adding token expiry tracking revokes legacy client tokens once; clients must log in again. Later restarts preserve token IDs and expiry locks.
 - Existing usage is labeled `anthropic`; Claude inserts continue to default to that provider.
-- New databases store clients and usage only. Existing databases receive missing columns in place; startup is repeatable. Old `openai_keys` rows are preserved but ignored; no destructive migration is performed.
+- New databases store clients and usage only. Existing databases receive missing columns in place; startup is repeatable. Old `openai_keys` rows are preserved but ignored. Only legacy token IDs are cleared by the expiry migration; client and usage records are retained.
 - Shared budget and client totals include both providers once OpenAI is used.
 - Key-group rows keep numeric `grp` and add `provider`, preventing collisions between Claude key 1 and OpenAI key 1.
 - No OpenAI key is required to keep serving Claude. Invalid explicitly supplied OpenAI configuration fails startup.
@@ -54,7 +54,7 @@ OpenAI's input count includes cached tokens; the gateway stores and returns unca
 
 ## Verification
 
-`npm test` covers the existing Claude flow and fake OpenAI integration: grants, role restrictions, five-key rotation, empty slots, key replacement on restart, failover, shared limits, errors, accounting, migration, and the non-overwriting environment append command. `npm run typecheck` checks source types. No real upstream calls are needed for these tests.
+`npm test` covers client expiry conflicts, concurrent login, renewal, secret-rotation recovery, restart persistence, migration, unchanged admin replacement, and the existing Claude/fake OpenAI flow: grants, role restrictions, five-key rotation, empty slots, key replacement on restart, failover, shared limits, errors, accounting, and the non-overwriting environment append command. `npm run typecheck` checks source types. No real upstream calls are needed for these tests.
 
 ## Deferred
 

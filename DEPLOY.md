@@ -214,7 +214,7 @@ Keep a separate secure backup of `.env`, which contains the actual Claude and Op
 
 ## Notes
 
-- **Restart effects:** admin session, login lockouts, per-minute counters and key cooldowns reset. Client tokens and OpenAI grants persist in the DB; keys reload from `.env`. Run one process; counters are not coordinated across instances.
+- **Restart effects:** admin session, login lockouts, per-minute counters and key cooldowns reset. Client tokens, expiry locks and OpenAI grants persist in the DB; keys reload from `.env`. The first upgrade adding `token_expires_at` revokes existing client tokens once because their expiry was not stored; clients must log in again. IDs, secrets, grants, limits and usage remain intact. No new `.env` setting is needed; `ONE_TOKEN_PER_CLIENT` is ignored and can be removed. Clients must renew after expiry; early login returns `409`. If a token is lost, wait until expiry or rotate the client's secret as admin for immediate recovery. Run one process; counters are not coordinated across instances.
 - **OpenAI:** allow outbound HTTPS to `api.openai.com`. Use its default base URL in production. Review provider usage and limits/alerts alongside the gateway's estimates; a failed/timed-out request may still be charged. Combined budgets check recorded spend and may be exceeded by in-flight calls.
 - **Anthropic Console:** set a monthly spend limit on the workspace as a final backstop.
 - **Old configuration:** remove `ADMIN_ALLOWED_IPS` from existing `.env` files; it is no longer used. Source IP changes do not affect valid logins. Authentication, 2FA, and failed-login lockouts remain enabled as configured.

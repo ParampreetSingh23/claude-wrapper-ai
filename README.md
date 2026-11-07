@@ -105,11 +105,13 @@ OpenAI key IDs are their `.env` slot numbers. Clear a slot and restart to stop u
 - `ADMIN_SECRET` requires at least 24 random characters; `JWT_SECRET` at least 32. Client secrets are hashed and compared in constant time.
 - Run `npm run admin:2fa`, set `ADMIN_TOTP_SECRET`, and restart. Codes are single-use. Admin sessions default to 15 minutes; client sessions to 60.
 - Admin and client access accept any source IP with valid credentials. The old `ADMIN_ALLOWED_IPS` setting is ignored and can be removed. Keep `HOST=127.0.0.1` behind your public HTTPS reverse proxy; use `TRUST_PROXY=true` only behind a proxy you control. Failed-login lockouts still apply per IP.
-- `ONE_TOKEN_PER_CLIENT` defaults to true: a new login cancels the old token. Rotating a secret cancels its current token. Revoking OpenAI access leaves Claude available.
+- Clients can obtain a new token only after their current token expires. Earlier `/token` calls with valid credentials return `409` with `expiresAt` and `retryAfterSeconds`; the existing token keeps working. Reuse it for both providers. Admin login still replaces its previous session. The old `ONE_TOKEN_PER_CLIENT` setting is ignored and can be removed; no new environment setting is needed.
+- Rotating a client secret revokes its token and clears the expiry lock, allowing immediate login with the new secret. If a client loses its token, it must wait until expiry or ask an admin to rotate its secret. Revoking OpenAI access leaves Claude available.
 - Admin responses use `no-store`; the page uses a nonce CSP and frame protection. Browser origins must be same-host or in `ALLOWED_ORIGINS`.
 - Back up SQLite using its backup mechanism and keep a secure backup of `.env`. Actual provider keys live only in server configuration; never commit `.env` or include it in shared exports.
 - OpenAI rotates across configured ready keys, resting keys after explicit 401/403, 429, or 5xx responses. It never tries resting keys early or automatically replays a timeout, disconnect, or invalid response. Keys in one project may share provider limits.
 - Rate counters, cooldowns, lockouts, and admin sessions reset on restart. Run one process; scaling requires shared state. Client tokens and grants persist in SQLite; keys reload from the environment.
+- On the first upgrade to the client expiry lock, the database migration revokes existing client tokens once because their expiry was not stored. Clients must log in again. IDs, secrets, grants, limits, and usage are preserved; later restarts retain tokens and their original expiry locks.
 - Claude's models, pricing, effort, and fallback behavior remain in `src/claude.ts` and its existing configuration. Set provider-side spend limits as a backstop.
 
 ## Files and guides
@@ -122,6 +124,6 @@ OpenAI key IDs are their `.env` slot numbers. Clear a slot and restart to stop u
 | `src/db.ts` | SQLite tables, migrations and queries |
 | `src/admin.html` | Shared dashboard and key/grant controls |
 | `src/totp.ts` | Admin authenticator setup and verification |
-| `test/gateway.test.ts`, `test/openai.test.ts` | Fake-upstream regression/integration tests |
+| `test/gateway.test.ts`, `test/openai.test.ts`, `test/token-lock.test.ts` | Fake-upstream regression/integration tests and token migration checks |
 
 [Postman verification guide](POSTMAN_GUIDE.md) · [Client guide](CLIENT_GUIDE.md) · [Deployment](DEPLOY.md) · [Architecture](ARCHITECTURE.md) · [Implementation decisions](PLAN.md)

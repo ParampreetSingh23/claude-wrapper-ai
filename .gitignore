@@ -7,6 +7,7 @@ data/
 .claude 
 .impeccable
 
-# Docs (except README)
+# Docs (except public guides)
 *.md
 !README.md
+!POSTMAN_GUIDE.md

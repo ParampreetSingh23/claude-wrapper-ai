@@ -45,7 +45,9 @@ flowchart LR
 
 `POST /token` verifies admin credentials from the environment or client secret hashes from SQLite. Admin login also checks configured TOTP. Any source IP can sign in with valid credentials; there is no IP allowlist. Login failures still feed a per-IP lockout. HS256 is pinned; JWTs contain `sub`, `role`, and `jti`.
 
-`requireClient` verifies JWT expiry, client role, the current active client row, and current token ID when one-token mode is enabled. `requireOpenAI` additionally checks `openai_enabled`. No provider grant is embedded in JWTs: revocations apply immediately to the next request. Rotating a secret cancels its current token. Admins use client accounts to send prompts.
+Client login checks credentials and active status before returning any session information. An unexpired token produces `409` with `expiresAt` and `retryAfterSeconds`, without returning or replacing the token. Otherwise the gateway signs a JWT and atomically claims the client's token slot only if no token exists or its stored expiry has passed. The conditional update also checks the secret hash and active status, preventing concurrent logins from issuing two usable tokens or bypassing secret rotation/disablement. The stored Unix-second expiry and response `expiresAt` come from the signed JWT's `exp` claim. No raw JWT is stored. `ONE_TOKEN_PER_CLIENT` is no longer used.
+
+`requireClient` verifies JWT expiry, client role, the current active client row, and current token ID. `requireOpenAI` additionally checks `openai_enabled`. No provider grant is embedded in JWTs: revocations apply immediately to the next request. Rotating a secret revokes its current token and clears the expiry lock, allowing immediate recovery. Admins use client accounts to send prompts; successful admin login still replaces the previous admin session.
 
 All management routes inherit `requireAdmin`: JWT verification, admin role and current admin session ID. This includes OpenAI key endpoints. Admin pages/APIs get no-store and browser hardening headers. User-supplied names and labels are rendered using DOM text nodes.
 
@@ -86,6 +88,7 @@ erDiagram
         integer requests_per_minute
         integer openai_enabled
         text token_id
+        integer token_expires_at
         text created_at
         text last_used_at
     }
@@ -108,7 +111,7 @@ erDiagram
 
 `real_key` identifies a key within its provider. OpenAI IDs are the numbers in `OPENAI_KEY_1` through `OPENAI_KEY_5`; blank slots are skipped without renumbering. Both providers read keys from the environment. Usage has no key foreign key. Replacing a key in a slot keeps that slot’s reporting history; clearing a slot and restarting stops using it.
 
-Startup creates tables/indexes and adds missing `token_id`, `openai_enabled`, and `usage.provider` columns. Old clients default to no OpenAI grant; historical usage defaults to `anthropic`. Existing records remain intact. WAL and foreign keys remain enabled. Indexes on `(client_id, created_at)` and `created_at` support limits and reports.
+Startup creates tables/indexes and adds missing `token_id`, `token_expires_at`, `openai_enabled`, and `usage.provider` columns. Adding `token_expires_at` and clearing legacy token IDs happen in one transaction: their expiry was never stored, so existing client tokens are revoked once. Later starts preserve both token ID and expiry. IDs, secret hashes, limits, existing grants and usage remain intact. Old clients without grants default to no OpenAI access; historical usage defaults to `anthropic`. WAL and foreign keys remain enabled. Indexes on `(client_id, created_at)` and `created_at` support limits and reports.
 
 Client summaries and `/me/usage` combine providers. Admin usage accepts an optional provider filter and a provider grouping. Key groups include both provider and numeric ID, preventing collisions. The dashboard renders separate provider totals and key tables.
 

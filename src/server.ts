@@ -46,9 +46,6 @@ const config = {
   loginLockoutMinutes: Number(env.LOGIN_LOCKOUT_MINUTES ?? 15),
   // Only "true" behind a reverse proxy you control (Caddy/nginx); otherwise clients could fake their IP.
   trustProxy: env.TRUST_PROXY === "true",
-  // One live token per client: a new login cancels the previous token. Set "false" only if several
-  // app instances must share one clientId and each logs in on its own.
-  oneTokenPerClient: env.ONE_TOKEN_PER_CLIENT !== "false",
   // Limits given to new clients when the admin doesn't set them. Empty = unlimited.
   defaultMonthlyBudgetUsd: optionalNumber(env.DEFAULT_MONTHLY_BUDGET_USD),
   defaultRequestsPerMinute: optionalNumber(env.DEFAULT_REQUESTS_PER_MINUTE),
@@ -187,7 +184,7 @@ async function requireClient(req: FastifyRequest, reply: FastifyReply) {
   const client = db.getClient(req.user.sub);
   if (!client || client.status !== "active") return reply.code(401).send({ error: "Client disabled" });
   // Same DB row also says which token is the current one; any older (or cancelled) token stops here.
-  if (config.oneTokenPerClient && req.user.jti !== client.token_id) return reply.code(401).send(REPLACED);
+  if (req.user.jti !== client.token_id) return reply.code(401).send({ error: "Token revoked" });
   req.client = client;
 }
 
@@ -278,6 +275,14 @@ app.register(
 
         const given = sha256(clientSecret);
         let role: Role;
+        const conflict = (expiresAt: number) => {
+          const retryAfterSeconds = Math.max(1, Math.ceil(expiresAt - Date.now() / 1000));
+          return reply.code(409).header("retry-after", String(retryAfterSeconds)).send({
+            error: "Client already has an active token",
+            expiresAt: new Date(expiresAt * 1000).toISOString(),
+            retryAfterSeconds,
+          });
+        };
         if (clientId === config.adminId) {
           const secretOk = sameHash(given, sha256(config.adminSecret));
           // One generic error so a guesser learns nothing about which credential was wrong.
@@ -288,19 +293,26 @@ app.register(
           const c = db.getClient(clientId);
           const secretOk = sameHash(given, c?.secret_hash ?? DUMMY_HASH);
           if (!c || !secretOk || c.status !== "active") return fail("client credentials");
+          if (c.token_id && c.token_expires_at !== null && c.token_expires_at > Date.now() / 1000) return conflict(c.token_expires_at);
           role = "client";
         }
         const expiresIn = (role === "admin" ? config.adminTokenTtlMinutes : config.tokenTtlMinutes) * 60;
-        // Remembering only the newest token id is what cancels every token issued before it.
         const jti = randomUUID();
+        const accessToken = await reply.jwtSign({ sub: clientId, role, jti }, { expiresIn });
+        // Use the signed claim so the database lock and response expire at exactly the JWT boundary.
+        const { exp } = app.jwt.decode<{ exp: number }>(accessToken)!;
         if (role === "admin") adminTokenId = jti;
-        else if (config.oneTokenPerClient) db.updateClient(clientId, { token_id: jti });
+        else if (!db.claimToken(clientId, given, jti, exp, Date.now() / 1000)) {
+          const c = db.getClient(clientId);
+          if (!c || !sameHash(given, c.secret_hash) || c.status !== "active") return fail("client credentials changed");
+          return conflict(c.token_expires_at!);
+        }
         return {
-          accessToken: await reply.jwtSign({ sub: clientId, role, jti }, { expiresIn }),
+          accessToken,
           tokenType: "Bearer",
           role,
           expiresIn,
-          expiresAt: new Date(Date.now() + expiresIn * 1000).toISOString(),
+          expiresAt: new Date(exp * 1000).toISOString(),
         };
       },
     );
@@ -554,7 +566,7 @@ app.register(
             ...(b.requestsPerMinute !== undefined && { requests_per_minute: b.requestsPerMinute }),
             ...(b.openaiEnabled !== undefined && { openai_enabled: b.openaiEnabled ? 1 : 0 }),
           });
-          const { secret_hash, token_id, ...client } = db.getClient(req.params.id)!;
+          const { secret_hash, token_id, token_expires_at, ...client } = db.getClient(req.params.id)!;
           return client;
         },
       );
@@ -563,7 +575,7 @@ app.register(
         if (!db.getClient(req.params.id)) return reply.code(404).send({ error: "No such client" });
         const clientSecret = `cs_${randomBytes(32).toString("base64url")}`;
         // Clearing token_id also cancels the token already issued with the old secret.
-        db.updateClient(req.params.id, { secret_hash: sha256(clientSecret), token_id: null });
+        db.updateClient(req.params.id, { secret_hash: sha256(clientSecret), token_id: null, token_expires_at: null });
         return { clientId: req.params.id, clientSecret, note: "Old secret and its token no longer work. Store this one now." };
       });
 

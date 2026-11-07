@@ -12,6 +12,7 @@ export type Client = {
   created_at: string;
   last_used_at: string | null;
   token_id: string | null; // id of the only token currently allowed for this client
+  token_expires_at: number | null; // JWT exp, in Unix seconds
   openai_enabled: number;
 };
 
@@ -43,7 +44,7 @@ const GROUP_COLUMNS: Record<GroupBy, string> = {
   provider: "u.provider",
 };
 
-const CLIENT_FIELDS = ["name", "status", "monthly_budget_usd", "requests_per_minute", "secret_hash", "token_id", "openai_enabled"] as const;
+const CLIENT_FIELDS = ["name", "status", "monthly_budget_usd", "requests_per_minute", "secret_hash", "token_id", "token_expires_at", "openai_enabled"] as const;
 type ClientPatch = Partial<Pick<Client, (typeof CLIENT_FIELDS)[number]>>;
 
 export function openDb(path: string) {
@@ -85,6 +86,16 @@ export function openDb(path: string) {
   const hasTokenId = (db.prepare("PRAGMA table_info(clients)").all() as { name: string }[]).some((c) => c.name === "token_id");
   if (!hasTokenId) db.exec("ALTER TABLE clients ADD COLUMN token_id TEXT");
   const clientColumns = db.prepare("PRAGMA table_info(clients)").all() as { name: string }[];
+  if (!clientColumns.some((c) => c.name === "token_expires_at")) {
+    // Legacy tokens have no known expiry; invalidate them once when adding the expiry lock.
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      db.exec("ALTER TABLE clients ADD COLUMN token_expires_at INTEGER; UPDATE clients SET token_id = NULL; COMMIT");
+    } catch (err) {
+      db.exec("ROLLBACK");
+      throw err;
+    }
+  }
   if (!clientColumns.some((c) => c.name === "openai_enabled")) {
     db.exec("ALTER TABLE clients ADD COLUMN openai_enabled INTEGER NOT NULL DEFAULT 0 CHECK (openai_enabled IN (0, 1))");
   }
@@ -94,6 +105,10 @@ export function openDb(path: string) {
   }
 
   const getClient = db.prepare("SELECT * FROM clients WHERE client_id = ?");
+  const claimToken = db.prepare(`
+    UPDATE clients SET token_id = ?, token_expires_at = ?
+    WHERE client_id = ? AND secret_hash = ? AND status = 'active'
+      AND (token_id IS NULL OR token_expires_at <= ?)`);
   const insertClient = db.prepare(`
     INSERT INTO clients (client_id, name, secret_hash, monthly_budget_usd, requests_per_minute, created_at)
     VALUES ($client_id, $name, $secret_hash, $monthly_budget_usd, $requests_per_minute, $created_at)`);
@@ -115,7 +130,9 @@ export function openDb(path: string) {
 
   return {
     getClient: (id: string) => getClient.get(id) as Client | undefined,
-    insertClient: (c: Omit<Client, "status" | "last_used_at" | "token_id" | "openai_enabled">) => void insertClient.run(c),
+    insertClient: (c: Omit<Client, "status" | "last_used_at" | "token_id" | "token_expires_at" | "openai_enabled">) => void insertClient.run(c),
+    claimToken: (id: string, hash: string, tokenId: string, expiresAt: number, now: number) =>
+      claimToken.run(tokenId, expiresAt, id, hash, now).changes === 1,
     touchClient: (id: string, at: string) => void touchClient.run(at, id),
     listClients: (monthStart: string) => listClients.all(monthStart),
     insertUsage: (u: UsageInsert) => void insertUsage.run({ provider: "anthropic", ...u }),

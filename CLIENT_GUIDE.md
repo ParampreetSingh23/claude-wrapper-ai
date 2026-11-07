@@ -22,7 +22,7 @@ Lost the secret? Ask the admin to **rotate** it. They can't look it up; only a h
 
 1. **Log in:** send your client ID + secret to `/token`. You get an **access token** valid for **60 minutes**.
 2. **Ask:** send prompts to `/send` (Claude) or `/openai/send` (OpenAI) with the token in the `Authorization` header. Reuse the same token for every request. The diagrams below illustrate the Claude path.
-3. **Renew:** when the token is about to expire (or you get `401 Token expired`), log in again.
+3. **Renew:** after the token expires (or you get `401 Token expired`), log in again. Earlier logins return `409`; keep using your current token.
 
 ```mermaid
 sequenceDiagram
@@ -57,10 +57,11 @@ sequenceDiagram
 
 ```mermaid
 flowchart TD
-    A(["Need to ask Claude"]) --> B{"Do I have a token<br/>and expiresAt is more than<br/>1 minute away?"}
+    A(["Need to ask Claude"]) --> B{"Do I have a token<br/>that has not expired?"}
     B -- yes --> D["POST /send<br/>Authorization: Bearer token"]
     B -- no --> C["POST /token<br/>save accessToken + expiresAt"]
-    C --> D
+    C -- "200" --> D
+    C -- "409" --> L["Use your saved token, or wait<br/>retryAfterSeconds before login"]
     D --> E{"Response status?"}
     E -- "200" --> F(["✅ Use output"])
     E -- "401 Token expired" --> C
@@ -264,12 +265,13 @@ Every error has a JSON body with an `error` message.
 | 401 | `Invalid credentials` | Wrong ID/secret at `/token`, or client disabled | Check values; if correct, ask the admin |
 | 401 | `Missing or invalid token` | No `Authorization` header, a typo, or a changed token | Send `Bearer <accessToken>` exactly as received |
 | 401 | `Token expired` | Token is older than 60 min | Call `/token` again |
-| 401 | `Token replaced by a newer login` | Someone (you, another copy of your app, or anyone with your secret) called `/token` again; only the newest token works | Use the newest token. If you didn't log in again, tell the admin: your secret may have leaked |
+| 401 | `Token revoked` | Admin rotated your secret, or a deployment revoked legacy tokens | Log in with your current credentials; obtain the new secret from the admin after rotation |
 | 401 | `Client disabled` | Admin disabled your client | Ask the admin |
 | 402 | `Monthly budget exceeded` | You've used your monthly budget (`budgetUsd`, `spentUsd` included) | Ask the admin to raise it, or wait for next month (UTC) |
 | 403 | `Origin not allowed` | Called from a web page on a site that isn't approved | Ask the admin to add your site, or call from your backend |
 | 403 | `Use a client account for this route` | Used an admin token on `/send` | Use a client ID + secret |
 | 403 | `OpenAI access is not enabled for this client` | Admin has not granted access or revoked it | Ask the admin |
+| 409 | `Client already has an active token` | Valid credentials, but the current token has not expired | Keep using your saved token. Otherwise wait `retryAfterSeconds` until `expiresAt`, or ask the admin to rotate your secret |
 | 429 | `Too many failed logins. Try again later.` | 5 failed `/token` attempts from your IP in 15 min | Wait `retryAfterSeconds`; check your ID and secret |
 | 429 | `Rate limit: N requests per minute` | You sent too many requests in the last minute | Wait `retryAfterSeconds` (also in the `retry-after` header) |
 | 429 | `All real keys are rate limited, retry later` | Company-wide Anthropic limit hit | Wait ~30–60 s and retry |
@@ -277,7 +279,7 @@ Every error has a JSON body with an `error` message.
 | 502 | `Upstream AI error` | Provider failure, timeout, disconnect, or invalid response | Check before resubmitting; the provider may already have charged |
 | 503 | `OpenAI has no configured keys` | No numbered OpenAI keys configured in the server environment | Contact the admin |
 
-**Automatic retries:** `401 Token expired` (after a new login), or `429` after waiting. A `502` can mean the provider processed the request before a timeout/disconnect; resubmitting may incur another charge. For `401 Token replaced by a newer login`, log in again once; if it keeps happening, two programs are sharing your client ID.
+**Automatic retries:** `401 Token expired` (after a new login), or `429` after waiting. For `/token` returning `409`, reuse your existing token or wait the returned `retryAfterSeconds` before trying login again. A `502` can mean the provider processed the request before a timeout/disconnect; resubmitting may incur another charge.
 **Don't retry:** `400`, `401 Invalid credentials`, `401 Client disabled`, `402`, `403`.
 
 ---
@@ -294,8 +296,8 @@ const CLIENT_SECRET = process.env.GATEWAY_CLIENT_SECRET!;
 let token: { value: string; expiresAt: number } | null = null;
 
 async function getToken(): Promise<string> {
-  // Reuse the token until 1 minute before it expires
-  if (token && token.expiresAt - Date.now() > 60_000) return token.value;
+  // Early renewal returns 409; reuse the token until expiry.
+  if (token && token.expiresAt > Date.now()) return token.value;
 
   const res = await fetch(`${BASE}/token`, {
     method: "POST",
@@ -345,8 +347,8 @@ CLIENT_SECRET = os.environ["GATEWAY_CLIENT_SECRET"]
 _token = {"value": None, "expires_at": 0.0}
 
 def get_token() -> str:
-    # Reuse the token until 1 minute before it expires
-    if _token["value"] and _token["expires_at"] - time.time() > 60:
+    # Early renewal returns 409; reuse the token until expiry.
+    if _token["value"] and _token["expires_at"] > time.time():
         return _token["value"]
     r = requests.post(f"{BASE}/token", json={"clientId": CLIENT_ID, "clientSecret": CLIENT_SECRET}, timeout=30)
     r.raise_for_status()
@@ -388,9 +390,10 @@ if __name__ == "__main__":
 - Use `https://` for the base URL outside your own machine.
 
 **Tokens**
-- **Only one token works at a time.** Each `/token` call cancels the token issued before it. Reuse one token for all requests during its 60 minutes; don't call `/token` before every `/send`.
-- Renew about 1 minute **before** `expiresAt` to avoid a failed request at the boundary.
-- Running several copies of your app? Ask the admin for **one client per copy** (or share one token between them). If each copy logs in with the same client ID, they keep cancelling each other's tokens.
+- **Only one unexpired token per client.** Repeated `/token` calls return `409` and leave the existing token and expiry unchanged. Don't call `/token` before every prompt.
+- Renew **after** `expiresAt` or `401 Token expired`. Responses use the token's exact expiry; allow for clock differences if login still returns `409`.
+- Running several copies of your app? Ask the admin for **one client per copy**, or securely share one token. Serialize token acquisition within each app so parallel requests don't compete to log in. The examples above assume sequential calls; concurrent callers must share the in-flight login too.
+- If you lose the token or restart an app that only cached it in memory, wait until expiry or ask the admin to rotate your client secret. A `409` response never returns the existing token.
 
 **Cost**
 - Every response tells you its `costUsd`. Check `/me/usage` to see your monthly total.
